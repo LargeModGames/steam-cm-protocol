@@ -191,6 +191,13 @@ impl Connection {
             .await
     }
 
+    /// Extract the incoming event receiver so `run()` can select over it
+    /// without holding `&mut self`. Replaces `self.incoming` with a dead channel.
+    pub fn take_incoming(&mut self) -> IncomingEvents {
+        let (_dead_tx, dead_rx) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.incoming, dead_rx)
+    }
+
     pub async fn state_snapshot(&self) -> ConnectionState {
         self.state.read().await.clone()
     }

@@ -5,11 +5,15 @@ use tokio::{
     time::sleep,
 };
 
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::{
     auth::{credentials, qr},
     connection::Connection,
     emsg::EMsg,
     error::{Error, Result},
+    friends::{self, PersonaState},
     protobuf::{
         CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLogon,
         CMsgClientLogonResponse, CMsgProtoBufHeader, EAuthTokenPlatformType,
@@ -17,6 +21,12 @@ use crate::{
     serverlist::ServerListCache,
     token::steamid_from_refresh_token,
 };
+
+#[derive(Debug)]
+pub enum RunCommand {
+    SetPersonaState(PersonaState),
+    RequestFriendData(Vec<u64>),
+}
 
 const PROTOCOL_VERSION: u32 = 65580;
 const CLIENT_LANGUAGE: &str = "english";
@@ -161,17 +171,71 @@ impl SteamClient {
             .map_err(|_| Error::Authentication("guard flow is no longer active".to_owned()))
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(
+        &mut self,
+        mut commands: UnboundedReceiver<RunCommand>,
+        events: UnboundedSender<crate::friends::FriendsEvent>,
+    ) -> Result<()> {
         let connection = self
             .connection
             .as_ref()
             .cloned()
             .ok_or_else(|| Error::Transport("no active connection".to_owned()))?;
-        let mut connection = connection.lock().await;
-        while let Some(event) = connection.next_event().await {
-            event?;
+
+        // Pull the incoming receiver out so we can select over it without
+        // holding &mut connection (which would conflict with send_message &self borrows).
+        let mut incoming = connection.lock().await.take_incoming();
+
+        // Set ourselves online so Steam starts pushing friend presence.
+        {
+            let conn = connection.lock().await;
+            let state = conn.state_snapshot().await;
+            let (header, body) = friends::build_change_status(&state, PersonaState::Online);
+            conn.send_message(EMsg::ClientChangeStatus, &header, &body).await?;
         }
-        Ok(())
+
+        loop {
+            tokio::select! {
+                packet = incoming.recv() => {
+                    match packet {
+                        Some(Ok(pkt)) => {
+                            if let Some(event) = friends::decode(&pkt) {
+                                // When the friends list arrives, immediately request persona data.
+                                if let friends::FriendsEvent::FriendsList(ref friend_list) = event {
+                                    let ids: Vec<u64> = friend_list.iter().map(|f| f.steamid).collect();
+                                    if !ids.is_empty() {
+                                        let conn = connection.lock().await;
+                                        let state = conn.state_snapshot().await;
+                                        let (header, body) = friends::build_request_friend_data(&state, ids);
+                                        let _ = conn.send_message(EMsg::ClientRequestFriendData, &header, &body).await;
+                                    }
+                                }
+                                let _ = events.send(event);
+                            }
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => return Ok(()),
+                    }
+                }
+                cmd = commands.recv() => {
+                    match cmd {
+                        Some(RunCommand::SetPersonaState(state)) => {
+                            let conn = connection.lock().await;
+                            let conn_state = conn.state_snapshot().await;
+                            let (header, body) = friends::build_change_status(&conn_state, state);
+                            conn.send_message(EMsg::ClientChangeStatus, &header, &body).await?;
+                        }
+                        Some(RunCommand::RequestFriendData(ids)) => {
+                            let conn = connection.lock().await;
+                            let conn_state = conn.state_snapshot().await;
+                            let (header, body) = friends::build_request_friend_data(&conn_state, ids);
+                            conn.send_message(EMsg::ClientRequestFriendData, &header, &body).await?;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+            }
+        }
     }
 }
 
