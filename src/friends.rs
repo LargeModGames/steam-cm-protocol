@@ -7,8 +7,8 @@ use crate::{
     },
 };
 
-// Flags for persona_state_requested: Status | PlayerName | GameExtraInfo | LastSeen
-const PERSONA_STATE_REQUESTED: u32 = 1 | 2 | 64 | 512;
+// EClientPersonaStateFlag: Status=1 | PlayerName=2 | LastSeen=64 | GameExtraInfo=256
+const PERSONA_STATE_REQUESTED: u32 = 1 | 2 | 64 | 256;
 
 // EFriendRelationship::Friend
 const RELATIONSHIP_FRIEND: u32 = 3;
@@ -67,6 +67,9 @@ pub struct Persona {
     pub game_app_id: Option<u32>,
     pub game_name: Option<String>,
     pub avatar_hash: Option<Vec<u8>>,
+    /// True when this update explicitly included game fields (even if they were cleared).
+    /// False when game fields were absent from the protobuf — existing values should be kept.
+    pub game_fields_present: bool,
 }
 
 #[derive(Debug)]
@@ -96,13 +99,17 @@ pub fn decode(packet: &Packet) -> Option<FriendsEvent> {
         let personas = msg
             .friends
             .into_iter()
-            .map(|f| Persona {
-                steamid: f.friendid(),
-                state: PersonaState::from_raw(f.persona_state()),
-                name: f.player_name.unwrap_or_default(),
-                game_app_id: f.game_played_app_id.filter(|&id| id != 0),
-                game_name: f.game_name.filter(|s| !s.is_empty()),
-                avatar_hash: f.avatar_hash.filter(|h| !h.is_empty()),
+            .map(|f| {
+                let game_fields_present = f.game_played_app_id.is_some() || f.game_name.is_some();
+                Persona {
+                    steamid: f.friendid(),
+                    state: PersonaState::from_raw(f.persona_state()),
+                    name: f.player_name.unwrap_or_default(),
+                    game_app_id: f.game_played_app_id.filter(|&id| id != 0),
+                    game_name: f.game_name.filter(|s| !s.is_empty()),
+                    avatar_hash: f.avatar_hash.filter(|h| !h.is_empty()),
+                    game_fields_present,
+                }
             })
             .collect();
         return Some(FriendsEvent::PersonaStates(personas));
@@ -178,6 +185,7 @@ mod tests {
                 assert_eq!(personas[0].state, PersonaState::Online);
                 assert_eq!(personas[0].game_app_id, Some(220));
                 assert_eq!(personas[0].game_name.as_deref(), Some("Half-Life 2"));
+                assert!(personas[0].game_fields_present);
             }
             _ => panic!("expected PersonaStates"),
         }
