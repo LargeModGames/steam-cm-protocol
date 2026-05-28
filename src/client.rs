@@ -1,0 +1,367 @@
+use std::sync::Arc;
+
+use tokio::{
+    sync::{Mutex, mpsc},
+    time::sleep,
+};
+
+use crate::{
+    auth::{credentials, qr},
+    connection::Connection,
+    emsg::EMsg,
+    error::{Error, Result},
+    protobuf::{
+        CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLogon,
+        CMsgClientLogonResponse, CMsgProtoBufHeader, EAuthTokenPlatformType,
+    },
+    serverlist::ServerListCache,
+    token::steamid_from_refresh_token,
+};
+
+const PROTOCOL_VERSION: u32 = 65580;
+const CLIENT_LANGUAGE: &str = "english";
+const CLIENT_OS_TYPE: u32 = 20;
+const DEFAULT_DEVICE_NAME: &str = "Vapour";
+const DEFAULT_WEBSITE_ID: &str = "Unknown";
+const DEFAULT_GAMING_DEVICE_TYPE: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthMethod {
+    Qr,
+    Credentials { account: String, password: String },
+    RefreshToken(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardKind {
+    EmailCode,
+    DeviceCode,
+    DeviceConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedOn {
+    pub steamid: u64,
+    pub account_name: String,
+    pub refresh_token: String,
+}
+
+#[derive(Debug)]
+pub enum AuthEvent {
+    QrChallenge(String),
+    GuardRequired(GuardKind),
+    Success(LoggedOn),
+    Failure(Error),
+}
+
+#[derive(Debug)]
+enum AuthCommand {
+    GuardCode(String),
+}
+
+#[derive(Debug, Default)]
+pub struct SteamClient {
+    servers: ServerListCache,
+    connection: Option<Arc<Mutex<Connection>>>,
+    auth_commands: Option<mpsc::UnboundedSender<AuthCommand>>,
+    account_name_hint: Option<String>,
+}
+
+impl SteamClient {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_account_name_hint(&mut self, account_name: impl Into<String>) {
+        self.account_name_hint = Some(account_name.into());
+    }
+
+    pub async fn connect(&mut self) -> Result<()> {
+        if let Some(connection) = &self.connection {
+            if !connection.lock().await.is_closed().await {
+                return Ok(());
+            }
+            self.connection = None;
+        }
+
+        let mut last_error = None;
+        for force_refresh in [false, true] {
+            let servers = self.servers.list(force_refresh).await?;
+            for server in servers {
+                match Connection::connect(&server.websocket_url()).await {
+                    Ok(connection) => {
+                        connection
+                            .send_message(
+                                EMsg::ClientHello,
+                                &CMsgProtoBufHeader::default(),
+                                &CMsgClientHello {
+                                    protocol_version: Some(PROTOCOL_VERSION),
+                                },
+                            )
+                            .await?;
+                        self.connection = Some(Arc::new(Mutex::new(connection)));
+                        return Ok(());
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::Transport("no CM endpoints available".to_owned())))
+    }
+
+    pub async fn begin_auth(
+        &mut self,
+        method: AuthMethod,
+    ) -> Result<mpsc::UnboundedReceiver<AuthEvent>> {
+        self.connect().await?;
+
+        let connection = self
+            .connection
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::Transport("connection missing after connect".to_owned()))?;
+        let account_name_hint = self.account_name_hint.clone();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        self.auth_commands = Some(command_tx);
+
+        tokio::spawn(async move {
+            let result = match method {
+                AuthMethod::Qr => run_qr_auth(connection, event_tx.clone()).await,
+                AuthMethod::Credentials { account, password } => {
+                    run_credentials_auth(connection, event_tx.clone(), command_rx, account, password)
+                        .await
+                }
+                AuthMethod::RefreshToken(refresh_token) => {
+                    run_refresh_token_auth(connection, refresh_token, account_name_hint).await
+                }
+            };
+
+            match result {
+                Ok(logged_on) => {
+                    let _ = event_tx.send(AuthEvent::Success(logged_on));
+                }
+                Err(error) => {
+                    let _ = event_tx.send(AuthEvent::Failure(error));
+                }
+            }
+        });
+
+        Ok(event_rx)
+    }
+
+    pub fn submit_guard_code(&self, code: impl Into<String>) -> Result<()> {
+        let sender = self
+            .auth_commands
+            .as_ref()
+            .ok_or_else(|| Error::Authentication("no guard flow is active".to_owned()))?;
+        sender
+            .send(AuthCommand::GuardCode(code.into()))
+            .map_err(|_| Error::Authentication("guard flow is no longer active".to_owned()))
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        let connection = self
+            .connection
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::Transport("no active connection".to_owned()))?;
+        let mut connection = connection.lock().await;
+        while let Some(event) = connection.next_event().await {
+            event?;
+        }
+        Ok(())
+    }
+}
+
+async fn run_qr_auth(
+    connection: Arc<Mutex<Connection>>,
+    event_tx: mpsc::UnboundedSender<AuthEvent>,
+) -> Result<LoggedOn> {
+    let mut challenge = {
+        let connection = connection.lock().await;
+        qr::begin(
+            &connection,
+            DEFAULT_DEVICE_NAME,
+            EAuthTokenPlatformType::KEAuthTokenPlatformTypeSteamClient as i32,
+            build_device_details(),
+            DEFAULT_WEBSITE_ID,
+        )
+        .await?
+    };
+
+    let _ = event_tx.send(AuthEvent::QrChallenge(challenge.challenge_url.clone()));
+
+    loop {
+        sleep(challenge.interval).await;
+        let poll_result = {
+            let connection = connection.lock().await;
+            qr::poll(&connection, &mut challenge).await?
+        };
+
+        match poll_result {
+            qr::PollState::Pending { challenge_changed } => {
+                if challenge_changed {
+                    let _ = event_tx.send(AuthEvent::QrChallenge(challenge.challenge_url.clone()));
+                }
+            }
+            qr::PollState::Complete(completed) => {
+                let mut connection = connection.lock().await;
+                return log_on_with_token(
+                    &mut connection,
+                    &completed.refresh_token,
+                    Some(completed.account_name),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+async fn run_credentials_auth(
+    connection: Arc<Mutex<Connection>>,
+    event_tx: mpsc::UnboundedSender<AuthEvent>,
+    mut command_rx: mpsc::UnboundedReceiver<AuthCommand>,
+    account: String,
+    password: String,
+) -> Result<LoggedOn> {
+    let session = {
+        let connection = connection.lock().await;
+        credentials::begin(
+            &connection,
+            &account,
+            &password,
+            DEFAULT_DEVICE_NAME,
+            build_device_details(),
+            DEFAULT_WEBSITE_ID,
+        )
+        .await?
+    };
+
+    if let Some(kind) = session.preferred_guard_kind() {
+        let _ = event_tx.send(AuthEvent::GuardRequired(kind.clone()));
+        match kind {
+            GuardKind::EmailCode | GuardKind::DeviceCode => {
+                let AuthCommand::GuardCode(code) = command_rx
+                    .recv()
+                    .await
+                    .ok_or_else(|| Error::Authentication("guard flow cancelled".to_owned()))?;
+                let connection = connection.lock().await;
+                credentials::submit_guard_code(&connection, &session, &code, kind).await?;
+            }
+            GuardKind::DeviceConfirmation => {}
+        }
+    }
+
+    loop {
+        sleep(session.interval).await;
+        let poll_result = {
+            let connection = connection.lock().await;
+            credentials::poll(&connection, &session).await?
+        };
+
+        if let Some(completed) = poll_result {
+            let mut connection = connection.lock().await;
+            return log_on_with_token(
+                &mut connection,
+                &completed.refresh_token,
+                Some(completed.account_name),
+            )
+            .await;
+        }
+    }
+}
+
+async fn run_refresh_token_auth(
+    connection: Arc<Mutex<Connection>>,
+    refresh_token: String,
+    account_name_hint: Option<String>,
+) -> Result<LoggedOn> {
+    let mut connection = connection.lock().await;
+    log_on_with_token(&mut connection, &refresh_token, account_name_hint).await
+}
+
+async fn log_on_with_token(
+    connection: &mut Connection,
+    refresh_token: &str,
+    account_name: Option<String>,
+) -> Result<LoggedOn> {
+    let steamid = steamid_from_refresh_token(refresh_token)
+        .ok_or_else(|| Error::Authentication("refresh token did not contain a valid steamid".to_owned()))?;
+    let account_name = account_name.unwrap_or_default();
+
+    let header = CMsgProtoBufHeader {
+        steamid: Some(steamid),
+        ..Default::default()
+    };
+    let body = CMsgClientLogon {
+        protocol_version: Some(PROTOCOL_VERSION),
+        client_language: Some(CLIENT_LANGUAGE.to_owned()),
+        client_os_type: Some(CLIENT_OS_TYPE),
+        client_supplied_steam_id: Some(steamid),
+        machine_id: Some(machine_id()),
+        account_name: if account_name.is_empty() {
+            None
+        } else {
+            Some(account_name.clone())
+        },
+        should_remember_password: Some(true),
+        supports_rate_limit_response: Some(true),
+        access_token: Some(refresh_token.to_owned()),
+        gaming_device_type: Some(DEFAULT_GAMING_DEVICE_TYPE),
+        ..Default::default()
+    };
+
+    connection.send_message(EMsg::ClientLogon, &header, &body).await?;
+
+    loop {
+        let packet = connection.next_event().await.ok_or(Error::Closed)??;
+        if packet.emsg != EMsg::ClientLogOnResponse.raw() {
+            continue;
+        }
+
+        let response = packet.decode_body::<CMsgClientLogonResponse>()?;
+        if response.eresult.unwrap_or_default() != 1 {
+            return Err(Error::Authentication(format!(
+                "ClientLogOn failed with eresult {}",
+                response.eresult.unwrap_or_default()
+            )));
+        }
+
+        let client_session_id = packet
+            .header
+            .client_sessionid
+            .ok_or(Error::MissingField("ClientLogOnResponse proto header client_sessionid"))?;
+        let heartbeat_seconds = response
+            .heartbeat_seconds
+            .or(response.legacy_out_of_game_heartbeat_seconds)
+            .ok_or(Error::MissingField("CMsgClientLogonResponse.heartbeat_seconds"))?;
+
+        connection
+            .set_logged_on(steamid, client_session_id, heartbeat_seconds)
+            .await?;
+
+        return Ok(LoggedOn {
+            steamid,
+            account_name,
+            refresh_token: refresh_token.to_owned(),
+        });
+    }
+}
+
+fn build_device_details() -> CAuthenticationDeviceDetails {
+    CAuthenticationDeviceDetails {
+        device_friendly_name: Some(DEFAULT_DEVICE_NAME.to_owned()),
+        platform_type: Some(EAuthTokenPlatformType::KEAuthTokenPlatformTypeSteamClient as i32),
+        os_type: Some(CLIENT_OS_TYPE as i32),
+        gaming_device_type: Some(DEFAULT_GAMING_DEVICE_TYPE),
+        client_count: Some(1),
+        machine_id: Some(machine_id()),
+        app_type: None,
+    }
+}
+
+fn machine_id() -> Vec<u8> {
+    b"vapour".to_vec()
+}
