@@ -236,16 +236,52 @@ impl SteamClient {
                             conn.send_message(EMsg::ClientRequestFriendData, &header, &body).await?;
                         }
                         Some(RunCommand::GetOwnedGames) => {
-                            let conn = connection.lock().await;
-                            let state = conn.state_snapshot().await;
-                            match library::get_owned_games(&conn, &state).await {
-                                Ok(games) => {
-                                    let _ = events.send(friends::FriendsEvent::OwnedGames(games));
-                                }
-                                Err(e) => {
-                                    tracing::warn!("GetOwnedGames failed: {e}");
-                                }
-                            }
+                            let rx = {
+                                let conn = connection.lock().await;
+                                let state = conn.state_snapshot().await;
+                                library::start_get_owned_games(&conn, &state).await
+                            }; // lock released here
+                            let events_clone = events.clone();
+                            tokio::spawn(async move {
+                                let games = match rx {
+                                    Err(e) => {
+                                        tracing::warn!("GetOwnedGames send failed: {e}");
+                                        vec![]
+                                    }
+                                    Ok(rx) => {
+                                        let result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(30),
+                                            rx,
+                                        )
+                                        .await;
+                                        match result {
+                                            Ok(Ok(Ok(packet))) => {
+                                                match library::decode_owned_games(packet) {
+                                                    Ok(g) => g,
+                                                    Err(e) => {
+                                                        tracing::warn!("GetOwnedGames decode: {e}");
+                                                        vec![]
+                                                    }
+                                                }
+                                            }
+                                            Ok(Ok(Err(e))) => {
+                                                tracing::warn!("GetOwnedGames failed: {e}");
+                                                vec![]
+                                            }
+                                            Ok(Err(_)) => {
+                                                tracing::warn!("GetOwnedGames: channel closed");
+                                                vec![]
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!("GetOwnedGames timed out after 30s");
+                                                vec![]
+                                            }
+                                        }
+                                    }
+                                };
+                                let _ = events_clone
+                                    .send(friends::FriendsEvent::OwnedGames(games));
+                            });
                         }
                         Some(RunCommand::GetPlayerAchievements(appid)) => {
                             let conn = connection.lock().await;

@@ -90,14 +90,23 @@ impl Connection {
                 match decode_frame(&binary) {
                     Ok(packets) => {
                         for packet in packets {
-                            if let Some(job_id) = packet.jobid_target() {
-                                let waiter = {
-                                    let mut pending = pending_jobs_for_read.lock().await;
-                                    pending.remove(&job_id)
-                                };
-                                if let Some(waiter) = waiter {
-                                    let _ = waiter.send(Ok(packet));
-                                    continue;
+                            // ServiceMethodSendToClient (9803) is a server push, not a
+                            // response to a pending request. Never route it to pending jobs
+                            // even if jobid_target happens to match — doing so would consume
+                            // the pending slot and silently drop the real response.
+                            let is_server_push =
+                                packet.emsg == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
+
+                            if !is_server_push {
+                                if let Some(job_id) = packet.jobid_target() {
+                                    let waiter = {
+                                        let mut pending = pending_jobs_for_read.lock().await;
+                                        pending.remove(&job_id)
+                                    };
+                                    if let Some(waiter) = waiter {
+                                        let _ = waiter.send(Ok(packet));
+                                        continue;
+                                    }
                                 }
                             }
 
@@ -145,9 +154,26 @@ impl Connection {
     pub async fn request<M>(
         &self,
         emsg: EMsg,
-        mut header: CMsgProtoBufHeader,
+        header: CMsgProtoBufHeader,
         body: &M,
     ) -> Result<Packet>
+    where
+        M: Message,
+    {
+        let rx = self.send_request(emsg, header, body).await?;
+        rx.await
+            .map_err(|_| self.closed_error())
+            .and_then(|result| result)
+    }
+
+    /// Send a request and return the response receiver without awaiting it.
+    /// The caller can release any held locks before awaiting the receiver.
+    pub async fn send_request<M>(
+        &self,
+        emsg: EMsg,
+        mut header: CMsgProtoBufHeader,
+        body: &M,
+    ) -> Result<oneshot::Receiver<Result<Packet>>>
     where
         M: Message,
     {
@@ -165,9 +191,7 @@ impl Connection {
             return Err(error);
         }
 
-        rx.await
-            .map_err(|_| self.closed_error())
-            .and_then(|result| result)
+        Ok(rx)
     }
 
     pub async fn next_event(&mut self) -> Option<Result<Packet>> {
