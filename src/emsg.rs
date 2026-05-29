@@ -14,6 +14,7 @@ pub enum EMsg {
     ClientRequestFriendData = 815,
     ClientLogon = 5514,
     ServiceMethodCallFromClient = 9802,
+    ServiceMethodSendToClient = 9803,
     ServiceMethodCallFromClientNonAuthed = 9804,
     ClientHello = 9805,
 }

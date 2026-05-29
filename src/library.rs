@@ -1,15 +1,21 @@
+use tokio::sync::oneshot;
+
 use crate::{
     connection::{Connection, ConnectionState},
+    emsg::EMsg,
     error::{Error, Result},
     friends::ProtocolGame,
-    protobuf::{CPlayerGetOwnedGamesRequest, CPlayerGetOwnedGamesResponse},
-    service_method::{ServiceMethod, call_authed},
+    message::Packet,
+    protobuf::{CMsgProtoBufHeader, CPlayerGetOwnedGamesRequest, CPlayerGetOwnedGamesResponse},
+    service_method::ServiceMethod,
 };
 
-pub async fn get_owned_games(
+/// Send the GetOwnedGames request and return the response receiver.
+/// The caller should release the connection lock before awaiting the receiver.
+pub async fn start_get_owned_games(
     connection: &Connection,
     state: &ConnectionState,
-) -> Result<Vec<ProtocolGame>> {
+) -> Result<oneshot::Receiver<Result<Packet>>> {
     let steamid = state
         .steamid
         .ok_or(Error::MissingField("steamid not set in connection state"))?;
@@ -23,8 +29,23 @@ pub async fn get_owned_games(
         ..Default::default()
     };
 
-    let response: CPlayerGetOwnedGamesResponse =
-        call_authed(connection, state, &method, &request).await?;
+    connection
+        .send_request(
+            EMsg::ServiceMethodCallFromClient,
+            CMsgProtoBufHeader {
+                steamid: state.steamid,
+                client_sessionid: state.client_session_id,
+                target_job_name: Some(method.target_job_name),
+                ..Default::default()
+            },
+            &request,
+        )
+        .await
+}
+
+/// Decode a GetOwnedGames response packet into a list of games.
+pub fn decode_owned_games(packet: Packet) -> Result<Vec<ProtocolGame>> {
+    let response: CPlayerGetOwnedGamesResponse = packet.decode_body()?;
 
     let mut games: Vec<ProtocolGame> = response
         .games
