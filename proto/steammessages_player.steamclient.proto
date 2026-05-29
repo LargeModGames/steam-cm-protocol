@@ -1,0 +1,56 @@
+import "steammessages_base.proto";
+import "steammessages_unified_base.steamclient.proto";
+import "enums.proto";
+
+option optimize_for = SPEED;
+option cc_generic_services = false;
+
+message CPlayer_GetOwnedGames_Request {
+	optional uint64 steamid = 1;
+	optional bool include_appinfo = 2;
+	optional bool include_played_free_games = 3;
+	repeated uint32 appids_filter = 4;
+	optional bool include_free_sub = 5;
+}
+
+message CPlayer_GetOwnedGames_Response {
+	message Game {
+		optional int32 appid = 1;
+		optional string name = 2;
+		optional int32 playtime_2weeks = 3;
+		optional int32 playtime_forever = 4;
+		optional string img_icon_url = 5;
+		optional bool has_community_visible_stats = 7;
+		optional int32 playtime_windows_forever = 8;
+		optional int32 playtime_mac_forever = 9;
+		optional int32 playtime_linux_forever = 10;
+		optional uint32 rtime_last_played = 11;
+	}
+	optional uint32 game_count = 1;
+	repeated .CPlayer_GetOwnedGames_Response.Game games = 2;
+}
+
+message CPlayer_GetUserStats_Request {
+	optional uint64 steamid = 1;
+	optional uint32 appid = 2;
+	optional bytes sha_schema = 3;
+	optional uint32 crc_stats = 4;
+}
+
+message CPlayer_GetUserStats_Response {
+	message Unlock_Time {
+		optional uint32 achievement_bit = 1;
+		optional fixed32 unlock_time = 2;
+	}
+
+	message Stats {
+		optional uint32 stat_id = 1;
+		optional uint32 stat_value = 2;
+		repeated .CPlayer_GetUserStats_Response.Unlock_Time unlock_times = 3;
+	}
+
+	optional bytes sha_schema = 1;
+	optional uint32 crc_stats = 2;
+	optional bytes schema = 3;
+	repeated .CPlayer_GetUserStats_Response.Stats stats = 4;
+}

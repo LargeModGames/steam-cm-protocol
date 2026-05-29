@@ -9,11 +9,13 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
+    achievements,
     auth::{credentials, qr},
     connection::Connection,
     emsg::EMsg,
     error::{Error, Result},
     friends::{self, PersonaState},
+    library,
     protobuf::{
         CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLogon,
         CMsgClientLogonResponse, CMsgProtoBufHeader, EAuthTokenPlatformType,
@@ -26,6 +28,8 @@ use crate::{
 pub enum RunCommand {
     SetPersonaState(PersonaState),
     RequestFriendData(Vec<u64>),
+    GetOwnedGames,
+    GetPlayerAchievements(u32),
 }
 
 const PROTOCOL_VERSION: u32 = 65580;
@@ -230,6 +234,38 @@ impl SteamClient {
                             let conn_state = conn.state_snapshot().await;
                             let (header, body) = friends::build_request_friend_data(&conn_state, ids);
                             conn.send_message(EMsg::ClientRequestFriendData, &header, &body).await?;
+                        }
+                        Some(RunCommand::GetOwnedGames) => {
+                            let conn = connection.lock().await;
+                            let state = conn.state_snapshot().await;
+                            match library::get_owned_games(&conn, &state).await {
+                                Ok(games) => {
+                                    let _ = events.send(friends::FriendsEvent::OwnedGames(games));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("GetOwnedGames failed: {e}");
+                                }
+                            }
+                        }
+                        Some(RunCommand::GetPlayerAchievements(appid)) => {
+                            let conn = connection.lock().await;
+                            let state = conn.state_snapshot().await;
+                            match achievements::get_player_achievements(&conn, &state, appid).await {
+                                Ok(achievements) => {
+                                    let _ = events.send(friends::FriendsEvent::PlayerAchievements {
+                                        appid,
+                                        achievements,
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!("GetPlayerAchievements({appid}) failed: {e}");
+                                    // Still emit an empty result so the UI clears any loading state.
+                                    let _ = events.send(friends::FriendsEvent::PlayerAchievements {
+                                        appid,
+                                        achievements: vec![],
+                                    });
+                                }
+                            }
                         }
                         None => return Ok(()),
                     }
