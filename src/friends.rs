@@ -72,10 +72,30 @@ pub struct Persona {
     pub game_fields_present: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProtocolGame {
+    pub appid: u32,
+    pub name: String,
+    pub playtime_forever: i32,
+    pub rtime_last_played: u32,
+    pub img_icon_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolAchievement {
+    pub apiname: String,
+    pub achieved: bool,
+    pub unlocktime: u64,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum FriendsEvent {
     FriendsList(Vec<Friend>),
     PersonaStates(Vec<Persona>),
+    OwnedGames(Vec<ProtocolGame>),
+    PlayerAchievements { appid: u32, achievements: Vec<ProtocolAchievement> },
 }
 
 /// Decode a packet into a FriendsEvent, returning None for unrelated packets.
