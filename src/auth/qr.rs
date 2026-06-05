@@ -4,9 +4,8 @@ use crate::{
     connection::Connection,
     error::{Error, Result},
     protobuf::{
-        CAuthenticationBeginAuthSessionViaQrRequest,
-        CAuthenticationBeginAuthSessionViaQrResponse, CAuthenticationDeviceDetails,
-        CAuthenticationPollAuthSessionStatusRequest,
+        CAuthenticationBeginAuthSessionViaQrRequest, CAuthenticationBeginAuthSessionViaQrResponse,
+        CAuthenticationDeviceDetails, CAuthenticationPollAuthSessionStatusRequest,
         CAuthenticationPollAuthSessionStatusResponse,
     },
     service_method::{ServiceMethod, call},
@@ -55,9 +54,9 @@ pub async fn begin(
     .await?;
 
     Ok(QrChallenge {
-        client_id: response
-            .client_id
-            .ok_or(Error::MissingField("CAuthenticationBeginAuthSessionViaQrResponse.client_id"))?,
+        client_id: response.client_id.ok_or(Error::MissingField(
+            "CAuthenticationBeginAuthSessionViaQrResponse.client_id",
+        ))?,
         request_id: response.request_id.ok_or(Error::MissingField(
             "CAuthenticationBeginAuthSessionViaQrResponse.request_id",
         ))?,
@@ -83,11 +82,9 @@ pub async fn poll(connection: &Connection, challenge: &mut QrChallenge) -> Resul
     if let Some(refresh_token) = response.refresh_token {
         return Ok(PollState::Complete(CompletedAuth {
             refresh_token,
-            account_name: response
-                .account_name
-                .ok_or(Error::MissingField(
-                    "CAuthenticationPollAuthSessionStatusResponse.account_name",
-                ))?,
+            account_name: response.account_name.ok_or(Error::MissingField(
+                "CAuthenticationPollAuthSessionStatusResponse.account_name",
+            ))?,
         }));
     }
 

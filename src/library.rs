@@ -1,70 +1,124 @@
-use tokio::sync::oneshot;
+use std::collections::HashMap;
 
 use crate::{
-    connection::{Connection, ConnectionState},
-    emsg::EMsg,
-    error::{Error, Result},
+    connection::Connection,
+    error::Result,
     friends::ProtocolGame,
-    message::Packet,
-    protobuf::{CMsgProtoBufHeader, CPlayerGetOwnedGamesRequest, CPlayerGetOwnedGamesResponse},
-    service_method::ServiceMethod,
+    pics::AppCatalogInfo,
+    protobuf::{CPlayerGetLastPlayedTimesRequest, CPlayerGetLastPlayedTimesResponse},
+    service_method::{ServiceMethod, call},
 };
 
-/// Send the GetOwnedGames request and return the response receiver.
-/// The caller should release the connection lock before awaiting the receiver.
-pub async fn start_get_owned_games(
-    connection: &Connection,
-    state: &ConnectionState,
-) -> Result<oneshot::Receiver<Result<Packet>>> {
-    let steamid = state
-        .steamid
-        .ok_or(Error::MissingField("steamid not set in connection state"))?;
-
-    let method = ServiceMethod::new("Player.GetOwnedGames#1");
-    let request = CPlayerGetOwnedGamesRequest {
-        steamid: Some(steamid),
-        include_appinfo: Some(true),
-        include_played_free_games: Some(true),
-        include_free_sub: Some(false),
-        ..Default::default()
-    };
-
-    connection
-        .send_request(
-            EMsg::ServiceMethodCallFromClient,
-            CMsgProtoBufHeader {
-                steamid: state.steamid,
-                client_sessionid: state.client_session_id,
-                target_job_name: Some(method.target_job_name),
-                ..Default::default()
-            },
-            &request,
-        )
-        .await
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaytimeInfo {
+    pub playtime_forever: i32,
+    pub rtime_last_played: u32,
 }
 
-/// Decode a GetOwnedGames response packet into a list of games.
-pub fn decode_owned_games(packet: Packet) -> Result<Vec<ProtocolGame>> {
-    let response: CPlayerGetOwnedGamesResponse = packet.decode_body()?;
+pub async fn get_last_played_times(connection: &Connection) -> Result<HashMap<u32, PlaytimeInfo>> {
+    let method = ServiceMethod::new("Player.ClientGetLastPlayedTimes#1");
+    let request = CPlayerGetLastPlayedTimesRequest {
+        min_last_played: Some(0),
+    };
+    let response: CPlayerGetLastPlayedTimesResponse = call(connection, &method, &request).await?;
 
-    let mut games: Vec<ProtocolGame> = response
+    let playtimes = response
         .games
         .into_iter()
-        .filter_map(|g| {
-            let appid = g.appid?;
-            if appid <= 0 {
-                return None;
-            }
-            Some(ProtocolGame {
-                appid: appid as u32,
-                name: g.name.unwrap_or_default(),
-                playtime_forever: g.playtime_forever.unwrap_or(0),
-                rtime_last_played: g.rtime_last_played.unwrap_or(0),
-                img_icon_url: g.img_icon_url,
-            })
+        .filter_map(|game| {
+            let appid = game.appid?;
+            (appid > 0).then_some((
+                appid as u32,
+                PlaytimeInfo {
+                    playtime_forever: game.playtime_forever.unwrap_or(0).max(0),
+                    rtime_last_played: game.last_playtime.unwrap_or(0),
+                },
+            ))
         })
         .collect();
 
-    games.sort_by(|a, b| b.playtime_forever.cmp(&a.playtime_forever));
-    Ok(games)
+    Ok(playtimes)
+}
+
+pub fn recently_played_games(playtimes: &HashMap<u32, PlaytimeInfo>) -> Vec<ProtocolGame> {
+    let mut games: Vec<ProtocolGame> = playtimes
+        .iter()
+        .filter(|(_, playtime)| playtime.rtime_last_played > 0)
+        .map(|(appid, playtime)| ProtocolGame {
+            appid: *appid,
+            name: String::new(),
+            playtime_forever: playtime.playtime_forever,
+            rtime_last_played: playtime.rtime_last_played,
+            img_icon_url: None,
+        })
+        .collect();
+    games.sort_by(|a, b| {
+        b.rtime_last_played
+            .cmp(&a.rtime_last_played)
+            .then_with(|| b.playtime_forever.cmp(&a.playtime_forever))
+    });
+    games
+}
+
+pub fn merge_catalog_and_playtimes(
+    catalog: Vec<AppCatalogInfo>,
+    playtimes: &HashMap<u32, PlaytimeInfo>,
+) -> Vec<ProtocolGame> {
+    let mut games: Vec<ProtocolGame> = catalog
+        .into_iter()
+        .map(|app| {
+            let playtime = playtimes.get(&app.appid).copied().unwrap_or_default();
+            ProtocolGame {
+                appid: app.appid,
+                name: app.name,
+                playtime_forever: playtime.playtime_forever,
+                rtime_last_played: playtime.rtime_last_played,
+                img_icon_url: app.img_icon_url,
+            }
+        })
+        .collect();
+
+    games.sort_by(|a, b| {
+        b.playtime_forever
+            .cmp(&a.playtime_forever)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.appid.cmp(&b.appid))
+    });
+    games
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_defaults_never_played_games_to_zero_playtime() {
+        let catalog = vec![
+            AppCatalogInfo {
+                appid: 20,
+                name: "Played".to_owned(),
+                img_icon_url: Some("icon".to_owned()),
+            },
+            AppCatalogInfo {
+                appid: 10,
+                name: "Never Played".to_owned(),
+                img_icon_url: None,
+            },
+        ];
+        let playtimes = HashMap::from([(
+            20,
+            PlaytimeInfo {
+                playtime_forever: 120,
+                rtime_last_played: 123,
+            },
+        )]);
+
+        let games = merge_catalog_and_playtimes(catalog, &playtimes);
+
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].appid, 20);
+        assert_eq!(games[0].playtime_forever, 120);
+        assert_eq!(games[1].appid, 10);
+        assert_eq!(games[1].playtime_forever, 0);
+    }
 }

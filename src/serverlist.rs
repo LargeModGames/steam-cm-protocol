@@ -60,7 +60,9 @@ pub async fn fetch_cm_list(client: &reqwest::Client) -> Result<Vec<CmServer>> {
     let directory: DirectoryResponse = response.json().await?;
 
     if !directory.response.success {
-        return Err(Error::Protocol("Steam CM directory returned failure".to_owned()));
+        return Err(Error::Protocol(
+            "Steam CM directory returned failure".to_owned(),
+        ));
     }
 
     let mut servers: Vec<CmServer> = directory
@@ -84,7 +86,9 @@ pub async fn fetch_cm_list(client: &reqwest::Client) -> Result<Vec<CmServer>> {
     });
 
     if servers.is_empty() {
-        return Err(Error::InvalidResponse("Steam CM directory returned no servers"));
+        return Err(Error::InvalidResponse(
+            "Steam CM directory returned no servers",
+        ));
     }
 
     Ok(servers)

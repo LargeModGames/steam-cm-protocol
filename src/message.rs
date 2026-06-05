@@ -21,11 +21,15 @@ pub struct Packet {
 
 impl Packet {
     pub fn jobid_target(&self) -> Option<u64> {
-        self.header.jobid_target.filter(|job_id| *job_id != NO_JOB_ID)
+        self.header
+            .jobid_target
+            .filter(|job_id| *job_id != NO_JOB_ID)
     }
 
     pub fn jobid_source(&self) -> Option<u64> {
-        self.header.jobid_source.filter(|job_id| *job_id != NO_JOB_ID)
+        self.header
+            .jobid_source
+            .filter(|job_id| *job_id != NO_JOB_ID)
     }
 
     pub fn target_job_name(&self) -> Option<&str> {
@@ -80,8 +84,8 @@ pub fn decode_packet(frame: &[u8]) -> Result<Packet> {
         return Err(Error::InvalidPacket("non-protobuf packet is unsupported"));
     }
 
-    let header_len = u32::from_le_bytes(frame[4..8].try_into().expect("slice length checked"))
-        as usize;
+    let header_len =
+        u32::from_le_bytes(frame[4..8].try_into().expect("slice length checked")) as usize;
     if frame.len() < 8 + header_len {
         return Err(Error::InvalidPacket("truncated protobuf header"));
     }
@@ -108,9 +112,7 @@ fn expand_packet(packet: Packet) -> Result<Vec<Packet>> {
 
     let data = if multi.size_unzipped.unwrap_or_default() > 0 {
         let mut decoder = GzDecoder::new(payload.as_slice());
-        let mut uncompressed = Vec::with_capacity(
-            multi.size_unzipped.unwrap_or_default() as usize,
-        );
+        let mut uncompressed = Vec::with_capacity(multi.size_unzipped.unwrap_or_default() as usize);
         decoder.read_to_end(&mut uncompressed)?;
         uncompressed
     } else {
@@ -231,12 +233,8 @@ mod tests {
             size_unzipped: Some(payload.len() as u32),
             message_body: Some(compressed),
         };
-        let encoded_multi = encode_message(
-            EMsg::Multi,
-            &CMsgProtoBufHeader::default(),
-            &multi,
-        )
-        .unwrap();
+        let encoded_multi =
+            encode_message(EMsg::Multi, &CMsgProtoBufHeader::default(), &multi).unwrap();
 
         let decoded = decode_frame(&encoded_multi).unwrap();
         assert_eq!(decoded.len(), 2);

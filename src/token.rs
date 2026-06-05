@@ -58,22 +58,25 @@ mod tests {
     fn extracts_steamid_from_string_sub_claim() {
         let token = make_token(r#"{"sub":"76561198000000000","aud":["web"]}"#);
 
-        assert_eq!(steamid_from_refresh_token(&token), Some(76_561_198_000_000_000));
+        assert_eq!(
+            steamid_from_refresh_token(&token),
+            Some(76_561_198_000_000_000)
+        );
     }
 
     #[test]
     fn extracts_steamid_from_numeric_sub_claim() {
         let token = make_token(r#"{"sub":76561198000000000}"#);
 
-        assert_eq!(steamid_from_refresh_token(&token), Some(76_561_198_000_000_000));
+        assert_eq!(
+            steamid_from_refresh_token(&token),
+            Some(76_561_198_000_000_000)
+        );
     }
 
     #[test]
     fn rejects_token_with_wrong_segment_count() {
-        assert_eq!(
-            steamid_from_refresh_token("header.payload"),
-            None,
-        );
+        assert_eq!(steamid_from_refresh_token("header.payload"), None,);
         assert_eq!(
             steamid_from_refresh_token("header.payload.signature.extra"),
             None,
