@@ -94,8 +94,12 @@ pub struct ProtocolAchievement {
 pub enum FriendsEvent {
     FriendsList(Vec<Friend>),
     PersonaStates(Vec<Persona>),
+    RecentlyPlayedGames(Vec<ProtocolGame>),
     OwnedGames(Vec<ProtocolGame>),
-    PlayerAchievements { appid: u32, achievements: Vec<ProtocolAchievement> },
+    PlayerAchievements {
+        appid: u32,
+        achievements: Vec<ProtocolAchievement>,
+    },
 }
 
 /// Decode a packet into a FriendsEvent, returning None for unrelated packets.
@@ -176,7 +180,7 @@ mod tests {
     use super::*;
     use crate::{
         emsg::EMsg,
-        message::{encode_message, decode_frame},
+        message::{decode_frame, encode_message},
         protobuf::{CMsgClientPersonaState, CMsgProtoBufHeader},
     };
 

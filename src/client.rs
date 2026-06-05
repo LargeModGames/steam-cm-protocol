@@ -15,9 +15,9 @@ use crate::{
     emsg::EMsg,
     error::{Error, Result},
     friends::{self, PersonaState},
-    library,
+    library, pics,
     protobuf::{
-        CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLogon,
+        CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLicenseList, CMsgClientLogon,
         CMsgClientLogonResponse, CMsgProtoBufHeader, EAuthTokenPlatformType,
     },
     serverlist::ServerListCache,
@@ -28,7 +28,7 @@ use crate::{
 pub enum RunCommand {
     SetPersonaState(PersonaState),
     RequestFriendData(Vec<u64>),
-    GetOwnedGames,
+    GetLibrary,
     GetPlayerAchievements(u32),
 }
 
@@ -144,8 +144,14 @@ impl SteamClient {
             let result = match method {
                 AuthMethod::Qr => run_qr_auth(connection, event_tx.clone()).await,
                 AuthMethod::Credentials { account, password } => {
-                    run_credentials_auth(connection, event_tx.clone(), command_rx, account, password)
-                        .await
+                    run_credentials_auth(
+                        connection,
+                        event_tx.clone(),
+                        command_rx,
+                        account,
+                        password,
+                    )
+                    .await
                 }
                 AuthMethod::RefreshToken(refresh_token) => {
                     run_refresh_token_auth(connection, refresh_token, account_name_hint).await
@@ -195,7 +201,8 @@ impl SteamClient {
             let conn = connection.lock().await;
             let state = conn.state_snapshot().await;
             let (header, body) = friends::build_change_status(&state, PersonaState::Online);
-            conn.send_message(EMsg::ClientChangeStatus, &header, &body).await?;
+            conn.send_message(EMsg::ClientChangeStatus, &header, &body)
+                .await?;
         }
 
         loop {
@@ -203,6 +210,13 @@ impl SteamClient {
                 packet = incoming.recv() => {
                     match packet {
                         Some(Ok(pkt)) => {
+                            if pkt.emsg == EMsg::ClientLicenseList.raw()
+                                && let Some(package_ids) = decode_license_list_packages(&pkt)
+                            {
+                                let conn = connection.lock().await;
+                                conn.set_package_ids(package_ids).await;
+                            }
+
                             if let Some(event) = friends::decode(&pkt) {
                                 // When the friends list arrives, immediately request persona data.
                                 if let friends::FriendsEvent::FriendsList(ref friend_list) = event {
@@ -235,52 +249,21 @@ impl SteamClient {
                             let (header, body) = friends::build_request_friend_data(&conn_state, ids);
                             conn.send_message(EMsg::ClientRequestFriendData, &header, &body).await?;
                         }
-                        Some(RunCommand::GetOwnedGames) => {
-                            let rx = {
-                                let conn = connection.lock().await;
-                                let state = conn.state_snapshot().await;
-                                library::start_get_owned_games(&conn, &state).await
-                            }; // lock released here
+                        Some(RunCommand::GetLibrary) => {
+                            let connection_clone = Arc::clone(&connection);
                             let events_clone = events.clone();
                             tokio::spawn(async move {
-                                let games = match rx {
-                                    Err(e) => {
-                                        tracing::warn!("GetOwnedGames send failed: {e}");
-                                        vec![]
+                                match load_library(connection_clone, events_clone.clone()).await {
+                                    Ok(games) => {
+                                        let _ = events_clone
+                                            .send(friends::FriendsEvent::OwnedGames(games));
                                     }
-                                    Ok(rx) => {
-                                        let result = tokio::time::timeout(
-                                            std::time::Duration::from_secs(30),
-                                            rx,
-                                        )
-                                        .await;
-                                        match result {
-                                            Ok(Ok(Ok(packet))) => {
-                                                match library::decode_owned_games(packet) {
-                                                    Ok(g) => g,
-                                                    Err(e) => {
-                                                        tracing::warn!("GetOwnedGames decode: {e}");
-                                                        vec![]
-                                                    }
-                                                }
-                                            }
-                                            Ok(Ok(Err(e))) => {
-                                                tracing::warn!("GetOwnedGames failed: {e}");
-                                                vec![]
-                                            }
-                                            Ok(Err(_)) => {
-                                                tracing::warn!("GetOwnedGames: channel closed");
-                                                vec![]
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!("GetOwnedGames timed out after 30s");
-                                                vec![]
-                                            }
-                                        }
+                                    Err(error) => {
+                                        tracing::warn!("GetLibrary failed: {error}");
+                                        let _ = events_clone
+                                            .send(friends::FriendsEvent::OwnedGames(vec![]));
                                     }
-                                };
-                                let _ = events_clone
-                                    .send(friends::FriendsEvent::OwnedGames(games));
+                                }
                             });
                         }
                         Some(RunCommand::GetPlayerAchievements(appid)) => {
@@ -308,6 +291,84 @@ impl SteamClient {
                 }
             }
         }
+    }
+}
+
+fn decode_license_list_packages(packet: &crate::message::Packet) -> Option<Vec<u32>> {
+    let msg = match packet.decode_body::<CMsgClientLicenseList>() {
+        Ok(msg) => msg,
+        Err(error) => {
+            tracing::warn!("ClientLicenseList decode failed: {error}");
+            return None;
+        }
+    };
+
+    let package_ids: Vec<u32> = msg
+        .licenses
+        .iter()
+        .filter_map(|license| license.package_id)
+        .filter(|package_id| *package_id != 0)
+        .collect();
+
+    tracing::info!(
+        licenses = msg.licenses.len(),
+        package_ids = package_ids.len(),
+        "ClientLicenseList received"
+    );
+
+    Some(package_ids)
+}
+
+async fn load_library(
+    connection: Arc<Mutex<Connection>>,
+    events: UnboundedSender<crate::friends::FriendsEvent>,
+) -> Result<Vec<friends::ProtocolGame>> {
+    let package_ids = wait_for_package_ids(&connection).await?;
+
+    let playtimes = {
+        let conn = connection.lock().await;
+        let playtimes = library::get_last_played_times(&conn).await?;
+        tracing::info!(
+            games = playtimes.len(),
+            "ClientGetLastPlayedTimes returned playtime data"
+        );
+        playtimes
+    };
+    let recently_played = library::recently_played_games(&playtimes);
+    let _ = events.send(friends::FriendsEvent::RecentlyPlayedGames(
+        recently_played.clone(),
+    ));
+
+    let catalog = {
+        let conn = connection.lock().await;
+        let state = conn.state_snapshot().await;
+        pics::load_owned_app_catalog(&conn, &state, package_ids).await?
+    };
+
+    let games = library::merge_catalog_and_playtimes(catalog, &playtimes);
+    tracing::info!(
+        games = games.len(),
+        recently_played = recently_played.len(),
+        "CM library pipeline completed"
+    );
+
+    Ok(games)
+}
+
+async fn wait_for_package_ids(connection: &Arc<Mutex<Connection>>) -> Result<Vec<u32>> {
+    loop {
+        let notify = {
+            let conn = connection.lock().await;
+            let state = conn.state_snapshot().await;
+            if let Some(reason) = state.close_reason {
+                return Err(Error::Transport(reason));
+            }
+            if state.license_list_received {
+                return Ok(state.package_ids);
+            }
+            conn.license_notify()
+        };
+        notify.notified().await;
     }
 }
 
@@ -423,8 +484,9 @@ async fn log_on_with_token(
     refresh_token: &str,
     account_name: Option<String>,
 ) -> Result<LoggedOn> {
-    let steamid = steamid_from_refresh_token(refresh_token)
-        .ok_or_else(|| Error::Authentication("refresh token did not contain a valid steamid".to_owned()))?;
+    let steamid = steamid_from_refresh_token(refresh_token).ok_or_else(|| {
+        Error::Authentication("refresh token did not contain a valid steamid".to_owned())
+    })?;
     let account_name = account_name.unwrap_or_default();
 
     let header = CMsgProtoBufHeader {
@@ -449,7 +511,9 @@ async fn log_on_with_token(
         ..Default::default()
     };
 
-    connection.send_message(EMsg::ClientLogon, &header, &body).await?;
+    connection
+        .send_message(EMsg::ClientLogon, &header, &body)
+        .await?;
 
     loop {
         let packet = connection.next_event().await.ok_or(Error::Closed)??;
@@ -465,14 +529,15 @@ async fn log_on_with_token(
             )));
         }
 
-        let client_session_id = packet
-            .header
-            .client_sessionid
-            .ok_or(Error::MissingField("ClientLogOnResponse proto header client_sessionid"))?;
+        let client_session_id = packet.header.client_sessionid.ok_or(Error::MissingField(
+            "ClientLogOnResponse proto header client_sessionid",
+        ))?;
         let heartbeat_seconds = response
             .heartbeat_seconds
             .or(response.legacy_out_of_game_heartbeat_seconds)
-            .ok_or(Error::MissingField("CMsgClientLogonResponse.heartbeat_seconds"))?;
+            .ok_or(Error::MissingField(
+                "CMsgClientLogonResponse.heartbeat_seconds",
+            ))?;
 
         connection
             .set_logged_on(steamid, client_session_id, heartbeat_seconds)

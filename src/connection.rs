@@ -10,7 +10,7 @@ use std::{
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use prost::Message;
 use tokio::{
-    sync::{Mutex, RwLock, mpsc, oneshot},
+    sync::{Mutex, Notify, RwLock, mpsc, oneshot},
     task::JoinHandle,
     time,
 };
@@ -25,6 +25,7 @@ use crate::{
 };
 
 type PendingJobs = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Packet>>>>>;
+type PendingStreams = Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<Result<Packet>>>>>;
 type IncomingEvents = mpsc::UnboundedReceiver<Result<Packet>>;
 type WriteHalf = SplitSink<SteamWebSocket, WebSocketMessage>;
 
@@ -34,15 +35,19 @@ pub struct ConnectionState {
     pub client_session_id: Option<i32>,
     pub heartbeat_seconds: Option<i32>,
     pub close_reason: Option<String>,
+    pub license_list_received: bool,
+    pub package_ids: Vec<u32>,
 }
 
 #[derive(Debug)]
 pub struct Connection {
     sender: Arc<Mutex<WriteHalf>>,
     pending_jobs: PendingJobs,
+    pending_streams: PendingStreams,
     incoming: IncomingEvents,
     next_job_id: AtomicU64,
     state: Arc<RwLock<ConnectionState>>,
+    license_notify: Arc<Notify>,
     read_task: JoinHandle<()>,
     heartbeat_task: Option<JoinHandle<()>>,
 }
@@ -52,13 +57,18 @@ impl Connection {
         let socket = connect(url).await?;
         let (writer, mut reader) = socket.split();
         let sender = Arc::new(Mutex::new(writer));
-        let pending_jobs = Arc::new(Mutex::new(HashMap::<
+        let pending_jobs = Arc::new(Mutex::new(
+            HashMap::<u64, oneshot::Sender<Result<Packet>>>::new(),
+        ));
+        let pending_streams = Arc::new(Mutex::new(HashMap::<
             u64,
-            oneshot::Sender<Result<Packet>>,
+            mpsc::UnboundedSender<Result<Packet>>,
         >::new()));
         let state = Arc::new(RwLock::new(ConnectionState::default()));
+        let license_notify = Arc::new(Notify::new());
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let pending_jobs_for_read = Arc::clone(&pending_jobs);
+        let pending_streams_for_read = Arc::clone(&pending_streams);
         let state_for_read = Arc::clone(&state);
 
         let read_task = tokio::spawn(async move {
@@ -67,7 +77,12 @@ impl Connection {
                     Ok(WebSocketMessage::Binary(payload)) => payload,
                     Ok(WebSocketMessage::Close(_)) => {
                         mark_closed(&state_for_read, "Steam CM closed the connection").await;
-                        fail_pending_jobs(&pending_jobs_for_read, Error::Closed).await;
+                        fail_pending_jobs(
+                            &pending_jobs_for_read,
+                            &pending_streams_for_read,
+                            Error::Closed,
+                        )
+                        .await;
                         let _ = incoming_tx.send(Err(Error::Closed));
                         break;
                     }
@@ -81,7 +96,12 @@ impl Connection {
                         let message = error.to_string();
                         let wrapped = Error::from(error);
                         mark_closed(&state_for_read, message.clone()).await;
-                        fail_pending_jobs(&pending_jobs_for_read, Error::Transport(message)).await;
+                        fail_pending_jobs(
+                            &pending_jobs_for_read,
+                            &pending_streams_for_read,
+                            Error::Transport(message),
+                        )
+                        .await;
                         let _ = incoming_tx.send(Err(wrapped));
                         break;
                     }
@@ -97,16 +117,26 @@ impl Connection {
                             let is_server_push =
                                 packet.emsg == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
 
-                            if !is_server_push {
-                                if let Some(job_id) = packet.jobid_target() {
-                                    let waiter = {
-                                        let mut pending = pending_jobs_for_read.lock().await;
-                                        pending.remove(&job_id)
-                                    };
-                                    if let Some(waiter) = waiter {
-                                        let _ = waiter.send(Ok(packet));
-                                        continue;
+                            if !is_server_push && let Some(job_id) = packet.jobid_target() {
+                                let waiter = {
+                                    let mut pending = pending_jobs_for_read.lock().await;
+                                    pending.remove(&job_id)
+                                };
+                                if let Some(waiter) = waiter {
+                                    let _ = waiter.send(Ok(packet));
+                                    continue;
+                                }
+
+                                let stream = {
+                                    let pending = pending_streams_for_read.lock().await;
+                                    pending.get(&job_id).cloned()
+                                };
+                                if let Some(stream) = stream {
+                                    if stream.send(Ok(packet)).is_err() {
+                                        let mut pending = pending_streams_for_read.lock().await;
+                                        pending.remove(&job_id);
                                     }
+                                    continue;
                                 }
                             }
 
@@ -116,7 +146,12 @@ impl Connection {
                     Err(error) => {
                         let message = error.to_string();
                         mark_closed(&state_for_read, message.clone()).await;
-                        fail_pending_jobs(&pending_jobs_for_read, Error::Transport(message)).await;
+                        fail_pending_jobs(
+                            &pending_jobs_for_read,
+                            &pending_streams_for_read,
+                            Error::Transport(message),
+                        )
+                        .await;
                         let _ = incoming_tx.send(Err(error));
                         break;
                     }
@@ -124,15 +159,22 @@ impl Connection {
             }
 
             mark_closed_if_unset(&state_for_read, "Steam CM read loop ended").await;
-            fail_pending_jobs(&pending_jobs_for_read, Error::Closed).await;
+            fail_pending_jobs(
+                &pending_jobs_for_read,
+                &pending_streams_for_read,
+                Error::Closed,
+            )
+            .await;
         });
 
         Ok(Self {
             sender,
             pending_jobs,
+            pending_streams,
             incoming: incoming_rx,
             next_job_id: AtomicU64::new(1),
             state,
+            license_notify,
             read_task,
             heartbeat_task: None,
         })
@@ -194,6 +236,39 @@ impl Connection {
         Ok(rx)
     }
 
+    /// Send a request whose response may arrive in multiple packets with the
+    /// same jobid_target. The caller must call `end_stream` after it sees the
+    /// protocol-level end marker.
+    pub async fn send_request_stream<M>(
+        &self,
+        emsg: EMsg,
+        mut header: CMsgProtoBufHeader,
+        body: &M,
+    ) -> Result<(u64, mpsc::UnboundedReceiver<Result<Packet>>)>
+    where
+        M: Message,
+    {
+        let job_id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
+        header.jobid_source = Some(job_id);
+        if header.jobid_target.is_none() {
+            header.jobid_target = Some(NO_JOB_ID);
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.pending_streams.lock().await.insert(job_id, tx);
+
+        if let Err(error) = self.send_message(emsg, &header, body).await {
+            self.pending_streams.lock().await.remove(&job_id);
+            return Err(error);
+        }
+
+        Ok((job_id, rx))
+    }
+
+    pub async fn end_stream(&self, job_id: u64) {
+        self.pending_streams.lock().await.remove(&job_id);
+    }
+
     pub async fn next_event(&mut self) -> Option<Result<Packet>> {
         self.incoming.recv().await
     }
@@ -224,6 +299,19 @@ impl Connection {
 
     pub async fn state_snapshot(&self) -> ConnectionState {
         self.state.read().await.clone()
+    }
+
+    pub async fn set_package_ids(&self, package_ids: Vec<u32>) {
+        {
+            let mut state = self.state.write().await;
+            state.license_list_received = true;
+            state.package_ids = package_ids;
+        }
+        self.license_notify.notify_waiters();
+    }
+
+    pub fn license_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.license_notify)
     }
 
     pub async fn is_closed(&self) -> bool {
@@ -277,7 +365,11 @@ impl Connection {
                 };
 
                 let mut writer = sender.lock().await;
-                if writer.send(WebSocketMessage::Binary(payload)).await.is_err() {
+                if writer
+                    .send(WebSocketMessage::Binary(payload))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -321,14 +413,31 @@ async fn mark_closed_if_unset(state: &Arc<RwLock<ConnectionState>>, reason: impl
     }
 }
 
-async fn fail_pending_jobs(pending_jobs: &PendingJobs, error: Error) {
+async fn fail_pending_jobs(
+    pending_jobs: &PendingJobs,
+    pending_streams: &PendingStreams,
+    error: Error,
+) {
     let waiters = {
         let mut pending = pending_jobs.lock().await;
-        pending.drain().map(|(_, waiter)| waiter).collect::<Vec<_>>()
+        pending
+            .drain()
+            .map(|(_, waiter)| waiter)
+            .collect::<Vec<_>>()
+    };
+    let streams = {
+        let mut pending = pending_streams.lock().await;
+        pending
+            .drain()
+            .map(|(_, stream)| stream)
+            .collect::<Vec<_>>()
     };
 
     let error_message = error.to_string();
     for waiter in waiters {
         let _ = waiter.send(Err(Error::Transport(error_message.clone())));
+    }
+    for stream in streams {
+        let _ = stream.send(Err(Error::Transport(error_message.clone())));
     }
 }

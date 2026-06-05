@@ -1,6 +1,6 @@
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::{
     error::{Error, Result},

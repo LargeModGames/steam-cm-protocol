@@ -9,11 +9,10 @@ use crate::{
     error::{Error, Result},
     protobuf::{
         CAuthenticationBeginAuthSessionViaCredentialsRequest,
-        CAuthenticationBeginAuthSessionViaCredentialsResponse,
-        CAuthenticationDeviceDetails, CAuthenticationGetPasswordRsaPublicKeyRequest,
+        CAuthenticationBeginAuthSessionViaCredentialsResponse, CAuthenticationDeviceDetails,
+        CAuthenticationGetPasswordRsaPublicKeyRequest,
         CAuthenticationGetPasswordRsaPublicKeyResponse,
-        CAuthenticationPollAuthSessionStatusRequest,
-        CAuthenticationPollAuthSessionStatusResponse,
+        CAuthenticationPollAuthSessionStatusRequest, CAuthenticationPollAuthSessionStatusResponse,
         CAuthenticationUpdateAuthSessionWithSteamGuardCodeRequest, EAuthSessionGuardType,
         EAuthTokenPlatformType, ESessionPersistence,
     },
@@ -42,17 +41,19 @@ pub struct CompletedAuth {
 
 impl CredentialSession {
     pub fn preferred_guard_kind(&self) -> Option<GuardKind> {
-        self.allowed_confirmations.iter().find_map(|kind| match kind {
-            GuardKind::EmailCode => Some(GuardKind::EmailCode),
-            GuardKind::DeviceCode => Some(GuardKind::DeviceCode),
-            GuardKind::DeviceConfirmation => None,
-        })
-        .or_else(|| {
-            self.allowed_confirmations
-                .iter()
-                .find(|kind| **kind == GuardKind::DeviceConfirmation)
-                .cloned()
-        })
+        self.allowed_confirmations
+            .iter()
+            .find_map(|kind| match kind {
+                GuardKind::EmailCode => Some(GuardKind::EmailCode),
+                GuardKind::DeviceCode => Some(GuardKind::DeviceCode),
+                GuardKind::DeviceConfirmation => None,
+            })
+            .or_else(|| {
+                self.allowed_confirmations
+                    .iter()
+                    .find(|kind| **kind == GuardKind::DeviceConfirmation)
+                    .cloned()
+            })
     }
 }
 
@@ -127,7 +128,10 @@ pub async fn submit_guard_code(
     Ok(())
 }
 
-pub async fn poll(connection: &Connection, session: &CredentialSession) -> Result<Option<CompletedAuth>> {
+pub async fn poll(
+    connection: &Connection,
+    session: &CredentialSession,
+) -> Result<Option<CompletedAuth>> {
     let response: CAuthenticationPollAuthSessionStatusResponse = call(
         connection,
         &ServiceMethod::new(POLL_METHOD),
@@ -142,11 +146,9 @@ pub async fn poll(connection: &Connection, session: &CredentialSession) -> Resul
     match response.refresh_token {
         Some(refresh_token) => Ok(Some(CompletedAuth {
             refresh_token,
-            account_name: response
-                .account_name
-                .ok_or(Error::MissingField(
-                    "CAuthenticationPollAuthSessionStatusResponse.account_name",
-                ))?,
+            account_name: response.account_name.ok_or(Error::MissingField(
+                "CAuthenticationPollAuthSessionStatusResponse.account_name",
+            ))?,
         })),
         None => Ok(None),
     }
@@ -170,20 +172,12 @@ async fn get_password_rsa_key(
     )
     .await?;
 
-    let modulus = parse_hex_biguint(
-        &response
-            .publickey_mod
-            .ok_or(Error::MissingField(
-                "CAuthenticationGetPasswordRsaPublicKeyResponse.publickey_mod",
-            ))?,
-    )?;
-    let exponent = parse_hex_biguint(
-        &response
-            .publickey_exp
-            .ok_or(Error::MissingField(
-                "CAuthenticationGetPasswordRsaPublicKeyResponse.publickey_exp",
-            ))?,
-    )?;
+    let modulus = parse_hex_biguint(&response.publickey_mod.ok_or(Error::MissingField(
+        "CAuthenticationGetPasswordRsaPublicKeyResponse.publickey_mod",
+    ))?)?;
+    let exponent = parse_hex_biguint(&response.publickey_exp.ok_or(Error::MissingField(
+        "CAuthenticationGetPasswordRsaPublicKeyResponse.publickey_exp",
+    ))?)?;
 
     Ok(PasswordRsaKey {
         public_key: RsaPublicKey::new(modulus, exponent)
@@ -208,9 +202,7 @@ fn parse_hex_biguint(value: &str) -> Result<BigUint> {
 
 fn map_guard_kind(code: Option<i32>) -> Option<GuardKind> {
     match code.and_then(|value| EAuthSessionGuardType::try_from(value).ok()) {
-        Some(EAuthSessionGuardType::KEAuthSessionGuardTypeEmailCode) => {
-            Some(GuardKind::EmailCode)
-        }
+        Some(EAuthSessionGuardType::KEAuthSessionGuardTypeEmailCode) => Some(GuardKind::EmailCode),
         Some(EAuthSessionGuardType::KEAuthSessionGuardTypeDeviceCode) => {
             Some(GuardKind::DeviceCode)
         }

@@ -44,8 +44,7 @@ where
 }
 
 /// Like `call` but uses `ServiceMethodCallFromClient` with the logged-on session
-/// headers (steamid + client_sessionid). Required for user-scoped service methods
-/// such as `Player.GetOwnedGames#1`.
+/// headers (steamid + client_sessionid). Required for user-scoped service methods.
 pub async fn call_authed<Req, Resp>(
     connection: &Connection,
     state: &ConnectionState,
