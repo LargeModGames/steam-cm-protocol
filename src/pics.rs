@@ -24,6 +24,20 @@ pub struct AppCatalogInfo {
     pub appid: u32,
     pub name: String,
     pub img_icon_url: Option<String>,
+    /// Steam appinfo `common.type`, lowercased ("game", "application", "tool", "dlc", …).
+    /// `None` when the app's product info was never resolved or carried no type.
+    pub app_type: Option<String>,
+}
+
+/// Library entries we surface: real games plus owned software/tools. DLC, soundtracks (music),
+/// videos, demos, configs, etc. are dropped — as are never-resolved empty rows. A named app whose
+/// type we couldn't read is kept so a parse miss never silently loses a real game.
+fn is_library_entry(app: &AppCatalogInfo) -> bool {
+    match app.app_type.as_deref() {
+        Some("game" | "application" | "tool") => true,
+        Some(_) => false,
+        None => !app.name.is_empty(),
+    }
 }
 
 pub async fn load_owned_app_catalog(
@@ -224,6 +238,7 @@ async fn resolve_app_infos(
                     appid: *appid,
                     name: String::new(),
                     img_icon_url: None,
+                    app_type: None,
                 },
             )
         })
@@ -292,12 +307,20 @@ async fn resolve_app_infos(
     }
 
     let mut apps: Vec<AppCatalogInfo> = apps_by_id.into_values().collect();
+    let before_filter = apps.len();
+    apps.retain(is_library_entry);
+    let dropped = before_filter - apps.len();
     apps.sort_by_key(|app| app.appid);
     tracing::info!(
         appids = appids.len(),
         parsed = parsed_count,
         named = named_count,
         "PICS app info parsing completed"
+    );
+    tracing::info!(
+        kept = apps.len(),
+        dropped,
+        "PICS type filter (dropped dlc/music/video/empty rows)"
     );
     Ok(apps)
 }
@@ -435,11 +458,17 @@ fn parse_binary_app_info(appid: u32, buffer: &[u8]) -> Option<AppCatalogInfo> {
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let app_type = common
+        .get("type")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
 
     Some(AppCatalogInfo {
         appid,
         name: name.to_owned(),
         img_icon_url: icon,
+        app_type,
     })
 }
 
@@ -458,11 +487,16 @@ fn parse_text_app_info(appid: u32, buffer: &[u8]) -> Option<AppCatalogInfo> {
         .or_else(|| common.get_str("icon"))
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let app_type = common
+        .get_str("type")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
 
     Some(AppCatalogInfo {
         appid,
         name: name.to_owned(),
         img_icon_url: icon,
+        app_type,
     })
 }
 
@@ -629,6 +663,50 @@ fn parse_vdf_node(lexer: &mut VdfLexer<'_>, stop_on_close: bool) -> Option<VdfNo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_app(appid: u32, name: &str, app_type: Option<&str>) -> AppCatalogInfo {
+        AppCatalogInfo {
+            appid,
+            name: name.to_owned(),
+            img_icon_url: None,
+            app_type: app_type.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn type_filter_keeps_games_software_tools_and_named_untyped() {
+        // Kept: games, software/applications, tools.
+        assert!(is_library_entry(&catalog_app(1, "Elden Ring", Some("game"))));
+        assert!(is_library_entry(&catalog_app(2, "Wallpaper Engine", Some("application"))));
+        assert!(is_library_entry(&catalog_app(3, "SteamVR", Some("tool"))));
+        // Kept: a named app whose type we couldn't resolve (parse miss must not lose a real game).
+        assert!(is_library_entry(&catalog_app(4, "Mystery Game", None)));
+
+        // Dropped: DLC/soundtracks/videos/demos/configs.
+        assert!(!is_library_entry(&catalog_app(5, "Shadow of the Erdtree", Some("dlc"))));
+        assert!(!is_library_entry(&catalog_app(6, "Original Soundtrack", Some("music"))));
+        assert!(!is_library_entry(&catalog_app(7, "Launch Trailer", Some("video"))));
+        assert!(!is_library_entry(&catalog_app(8, "Playtest", Some("demo"))));
+        // Dropped: never-resolved empty row (no type, no name).
+        assert!(!is_library_entry(&catalog_app(9, "", None)));
+    }
+
+    #[test]
+    fn parses_app_type_from_text_common_section() {
+        let data = br#"
+            "appinfo"
+            {
+                "common"
+                {
+                    "name" "Some DLC"
+                    "type" "DLC"
+                }
+            }
+        "#;
+        let app = parse_app_info(123, data).expect("app info should parse");
+        assert_eq!(app.app_type.as_deref(), Some("dlc"));
+        assert!(!is_library_entry(&app));
+    }
 
     #[test]
     fn parses_package_appids_from_binary_kv() {
