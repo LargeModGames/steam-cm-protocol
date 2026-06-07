@@ -1,13 +1,23 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use crate::{
     connection::{Connection, ConnectionState},
+    emsg::EMsg,
     error::{Error, Result},
     friends::ProtocolAchievement,
     kv::{self, KVValue},
-    protobuf::{CPlayerGetUserStatsRequest, CPlayerGetUserStatsResponse},
-    service_method::{ServiceMethod, call},
+    protobuf::{
+        CMsgClientGamesPlayed, CMsgClientGetUserStats, CMsgClientGetUserStatsResponse,
+        CMsgProtoBufHeader, c_msg_client_games_played::GamePlayed,
+        c_msg_client_get_user_stats_response::AchievementBlocks,
+    },
 };
+
+/// Steam EResult OK.
+const ERESULT_OK: i32 = 1;
+/// Delay between starting "games played" and retrying the stats request, so Steam
+/// registers the app as currently playing before serving user-private stats.
+const GAMES_PLAYED_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub async fn get_player_achievements(
     connection: &Connection,
@@ -18,59 +28,145 @@ pub async fn get_player_achievements(
         .steamid
         .ok_or(Error::MissingField("steamid not set in connection state"))?;
 
-    let method = ServiceMethod::new("Player.GetUserStats#1");
-    let request = CPlayerGetUserStatsRequest {
-        steamid: Some(steamid),
-        appid: Some(appid),
-        ..Default::default()
+    let request = CMsgClientGetUserStats {
+        game_id: Some(appid as u64),
+        steam_id_for_user: Some(steamid),
+        crc_stats: Some(0), // 0 forces Steam to return the full schema + blocks
+        schema_local_version: None,
     };
 
-    // KNOWN LIMITATION (v0.2): this returns no achievements. The authed envelope (9802) gets no
-    // `ServiceMethodResponse` (147) from Steam — only a `9803` token push — so it times out;
-    // the NonAuthed envelope (used here, so it fails fast instead of stalling) responds but with an
-    // empty schema, since a session with no authed identity is not given user-private stats. The
-    // working path is the dedicated `ClientGetUserStats` EMsg (SteamKit2); the binary-KV schema
-    // parser below already targets that format. Tracked for a follow-up.
-    let response: CPlayerGetUserStatsResponse = call(connection, &method, &request).await?;
+    let mut response = request_user_stats(connection, state, appid, &request).await?;
+
+    // Steam only serves user-private stats when the app is "currently playing". If the first
+    // request fails (typically eresult=2 Fail), mark the app as played, retry once, then stop.
+    if response.eresult != Some(ERESULT_OK) {
+        tracing::debug!(
+            appid,
+            eresult = ?response.eresult,
+            "user stats request not OK, retrying with games-played"
+        );
+
+        connection
+            .send_message(
+                EMsg::ClientGamesPlayed,
+                &session_header(state),
+                &CMsgClientGamesPlayed {
+                    games_played: vec![GamePlayed {
+                        game_id: Some(appid as u64),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        tokio::time::sleep(GAMES_PLAYED_RETRY_DELAY).await;
+
+        let retry = request_user_stats(connection, state, appid, &request).await;
+
+        // Always clear games-played so we don't leave the user shown as in-game.
+        let _ = connection
+            .send_message(
+                EMsg::ClientGamesPlayed,
+                &session_header(state),
+                &CMsgClientGamesPlayed {
+                    games_played: vec![],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        response = retry?;
+    }
+
+    let schema_len = response.schema.as_ref().map(|s| s.len()).unwrap_or(0);
+    tracing::info!(
+        appid,
+        eresult = ?response.eresult,
+        schema_len,
+        achievement_blocks = response.achievement_blocks.len(),
+        "user stats response received"
+    );
 
     let schema_bytes = response.schema.unwrap_or_default();
     if schema_bytes.is_empty() {
         return Ok(vec![]);
     }
 
-    // Parse the binary KV schema to extract achievement definitions.
-    let defs = match parse_achievement_schema(&schema_bytes) {
+    let achievements = build_achievements(&schema_bytes, &response.achievement_blocks);
+
+    tracing::info!(
+        appid,
+        defs = achievements.len(),
+        unlocked = achievements.iter().filter(|a| a.achieved).count(),
+        "achievements built"
+    );
+
+    Ok(achievements)
+}
+
+async fn request_user_stats(
+    connection: &Connection,
+    state: &ConnectionState,
+    appid: u32,
+    request: &CMsgClientGetUserStats,
+) -> Result<CMsgClientGetUserStatsResponse> {
+    let header = CMsgProtoBufHeader {
+        steamid: state.steamid,
+        client_sessionid: state.client_session_id,
+        routing_appid: Some(appid),
+        ..Default::default()
+    };
+    let packet = connection
+        .request(EMsg::ClientGetUserStats, header, request)
+        .await?;
+    packet.decode_body::<CMsgClientGetUserStatsResponse>()
+}
+
+fn session_header(state: &ConnectionState) -> CMsgProtoBufHeader {
+    CMsgProtoBufHeader {
+        steamid: state.steamid,
+        client_sessionid: state.client_session_id,
+        ..Default::default()
+    }
+}
+
+/// Pure mapping from a binary-KV achievement schema plus the response's achievement blocks to the
+/// surfaced achievement list. Kept free of `Connection` so it can be unit tested directly.
+pub(crate) fn build_achievements(
+    schema_bytes: &[u8],
+    blocks: &[AchievementBlocks],
+) -> Vec<ProtocolAchievement> {
+    let defs = match parse_achievement_schema(schema_bytes) {
         Ok(d) => d,
         Err(error) => {
             tracing::warn!(
-                appid,
                 schema_len = schema_bytes.len(),
                 %error,
                 "achievement schema parse failed"
             );
-            return Ok(vec![]);
+            return vec![];
         }
     };
 
     if defs.is_empty() {
-        return Ok(vec![]);
+        return vec![];
     }
 
-    // Build unlock map: (stat_id, achievement_bit) → unlock_time
+    // Build unlock map keyed by (achievement-group stat_id, bit position). An achievement block's
+    // `achievement_id` is the schema stat_id; `unlock_time[pos]` corresponds to schema bits/<pos>.
+    // A bit is unlocked iff its unlock_time != 0 (value = Unix epoch unlock time).
     let mut unlocked: HashMap<(u32, u32), u64> = HashMap::new();
-    for stat in response.stats {
-        let stat_id = stat.stat_id.unwrap_or(0);
-        for ut in stat.unlock_times {
-            let bit = ut.achievement_bit.unwrap_or(0);
-            let time = ut.unlock_time.unwrap_or(0) as u64;
-            if time > 0 {
-                unlocked.insert((stat_id, bit), time);
+    for block in blocks {
+        let stat_id = block.achievement_id.unwrap_or(0);
+        for (pos, &t) in block.unlock_time.iter().enumerate() {
+            if t != 0 {
+                unlocked.insert((stat_id, pos as u32), t as u64);
             }
         }
     }
 
-    let achievements = defs
-        .into_iter()
+    defs.into_iter()
         .map(|def| {
             let unlock_time = unlocked.get(&(def.stat_id, def.bit)).copied().unwrap_or(0);
             ProtocolAchievement {
@@ -81,9 +177,7 @@ pub async fn get_player_achievements(
                 description: def.description,
             }
         })
-        .collect();
-
-    Ok(achievements)
+        .collect()
 }
 
 struct AchievementDef {
@@ -219,4 +313,115 @@ fn parse_achievement_schema(data: &[u8]) -> Result<Vec<AchievementDef>> {
     let root = kv::parse_binary_kv(data)
         .ok_or_else(|| Error::Transport("achievement schema binary KV parse failed".to_owned()))?;
     Ok(extract_achievements(&root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal binary-KV achievement schema blob matching the layout `kv.rs` parses:
+    /// type bytes 0x00 = nested, 0x01 = string; each child block terminated by 0x08.
+    ///
+    /// root {
+    ///   stats {
+    ///     "0" {
+    ///       type "4"
+    ///       bits {
+    ///         "0" { name "ACH_FIRST" display { name { english "First!" } } }
+    ///         "1" { name "ACH_SECOND" }
+    ///       }
+    ///     }
+    ///   }
+    /// }
+    fn synthetic_schema() -> Vec<u8> {
+        let mut data = Vec::new();
+        // root (nested, empty key)
+        data.push(0x00);
+        data.push(0x00);
+        // stats (nested)
+        data.push(0x00);
+        data.extend_from_slice(b"stats\0");
+        {
+            // stats/"0" (nested)
+            data.push(0x00);
+            data.extend_from_slice(b"0\0");
+            {
+                // type = "4" (string)
+                data.push(0x01);
+                data.extend_from_slice(b"type\0");
+                data.extend_from_slice(b"4\0");
+                // bits (nested)
+                data.push(0x00);
+                data.extend_from_slice(b"bits\0");
+                {
+                    // bits/"0" (nested)
+                    data.push(0x00);
+                    data.extend_from_slice(b"0\0");
+                    {
+                        // name = "ACH_FIRST"
+                        data.push(0x01);
+                        data.extend_from_slice(b"name\0");
+                        data.extend_from_slice(b"ACH_FIRST\0");
+                        // display (nested)
+                        data.push(0x00);
+                        data.extend_from_slice(b"display\0");
+                        {
+                            // display/name (nested)
+                            data.push(0x00);
+                            data.extend_from_slice(b"name\0");
+                            {
+                                // display/name/english = "First!"
+                                data.push(0x01);
+                                data.extend_from_slice(b"english\0");
+                                data.extend_from_slice(b"First!\0");
+                            }
+                            data.push(0x08); // end display/name
+                        }
+                        data.push(0x08); // end display
+                    }
+                    data.push(0x08); // end bits/"0"
+                    // bits/"1" (nested)
+                    data.push(0x00);
+                    data.extend_from_slice(b"1\0");
+                    {
+                        // name = "ACH_SECOND"
+                        data.push(0x01);
+                        data.extend_from_slice(b"name\0");
+                        data.extend_from_slice(b"ACH_SECOND\0");
+                    }
+                    data.push(0x08); // end bits/"1"
+                }
+                data.push(0x08); // end bits
+            }
+            data.push(0x08); // end stats/"0"
+        }
+        data.push(0x08); // end stats
+        data.push(0x08); // end root
+        data
+    }
+
+    #[test]
+    fn build_achievements_joins_schema_and_unlock_blocks() {
+        let schema = synthetic_schema();
+        let blocks = vec![AchievementBlocks {
+            achievement_id: Some(0),
+            unlock_time: vec![1_700_000_000, 0], // bit 0 unlocked, bit 1 locked
+        }];
+
+        let mut achievements = build_achievements(&schema, &blocks);
+        achievements.sort_by(|a, b| a.apiname.cmp(&b.apiname));
+
+        assert_eq!(achievements.len(), 2);
+
+        let first = &achievements[0];
+        assert_eq!(first.apiname, "ACH_FIRST");
+        assert!(first.achieved);
+        assert_eq!(first.unlocktime, 1_700_000_000);
+        assert_eq!(first.name.as_deref(), Some("First!"));
+
+        let second = &achievements[1];
+        assert_eq!(second.apiname, "ACH_SECOND");
+        assert!(!second.achieved);
+        assert_eq!(second.unlocktime, 0);
+    }
 }
