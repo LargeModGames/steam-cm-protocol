@@ -344,9 +344,10 @@ async fn load_library(
 
     let playtimes = {
         let conn = connection.lock().await;
+        let state = conn.state_snapshot().await;
         // Bounded so a silently-ignored service method can't freeze the whole pipeline. On
         // timeout/error, load the library without playtime — names and icons still resolve.
-        match timeout(PLAYTIME_TIMEOUT, library::get_last_played_times(&conn)).await {
+        match timeout(PLAYTIME_TIMEOUT, library::get_last_played_times(&conn, &state)).await {
             Ok(Ok(playtimes)) => {
                 tracing::info!(
                     games = playtimes.len(),
