@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proto_dir.join("steammessages_clientserver_appinfo.proto"),
         proto_dir.join("steammessages_clientserver_friends.proto"),
         proto_dir.join("steammessages_player.steamclient.proto"),
+        proto_dir.join("steammessages_friendmessages.steamclient.proto"),
     ];
 
     println!("cargo:rerun-if-changed=build.rs");

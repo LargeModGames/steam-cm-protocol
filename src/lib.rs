@@ -3,6 +3,7 @@ pub mod auth {
     pub mod credentials;
     pub mod qr;
 }
+pub mod chat;
 pub mod client;
 pub mod connection;
 pub mod emsg;
@@ -23,6 +24,7 @@ pub mod transport {
     pub mod websocket;
 }
 
+pub use chat::ChatMessage;
 pub use client::{AuthEvent, AuthMethod, GuardKind, LoggedOn, RunCommand, SteamClient};
 pub use error::{Error, Result};
 pub use friends::{Friend, FriendsEvent, Persona, PersonaState, ProtocolAchievement, ProtocolGame};
