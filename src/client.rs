@@ -248,7 +248,7 @@ impl SteamClient {
                                 }
                                 let _ = events.send(event);
                             } else if let Some(event) = chat::decode_incoming(&pkt) {
-                                // Unsolicited friend message / typing push (EMsg 152).
+                                // Unsolicited friend message / typing push (EMsg 146 ServiceMethod).
                                 let _ = events.send(event);
                             }
                         }
@@ -643,6 +643,11 @@ async fn log_on_with_token(
         supports_rate_limit_response: Some(true),
         access_token: Some(refresh_token.to_owned()),
         gaming_device_type: Some(DEFAULT_GAMING_DEVICE_TYPE),
+        // Opt into Steam's "new chat" (unified ChatRoom/FriendMessages). This is the *only*
+        // opt-in for real-time message pushes: without it Steam does not push
+        // `FriendMessagesClient.IncomingMessage#1` to this session (matches node-steam-user, which
+        // sets `chat_mode: 2`). Sending and history fetch work without it; live receive does not.
+        chat_mode: Some(2),
         ..Default::default()
     };
 

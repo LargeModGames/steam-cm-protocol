@@ -110,12 +110,15 @@ impl Connection {
                 match decode_frame(&binary) {
                     Ok(packets) => {
                         for packet in packets {
-                            // ServiceMethodSendToClient is a server push, not a
-                            // response to a pending request. Never route it to pending jobs
-                            // even if jobid_target happens to match — doing so would consume
-                            // the pending slot and silently drop the real response.
-                            let is_server_push =
-                                packet.emsg == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
+                            // Server-initiated service notifications (`ServiceMethod` 146, e.g.
+                            // `FriendMessagesClient.IncomingMessage#1`, and the rarer
+                            // `ServiceMethodSendToClient` 152) are pushes, not responses to a
+                            // pending request. Never route them to pending jobs even if jobid_target
+                            // happens to match — doing so would consume the pending slot and silently
+                            // drop the real response. (Responses are `ServiceMethodResponse` 147.)
+                            let is_server_push = packet.emsg
+                                == crate::emsg::EMsg::ServiceMethod.raw()
+                                || packet.emsg == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
 
                             if !is_server_push && let Some(job_id) = packet.jobid_target() {
                                 let waiter = {

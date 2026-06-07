@@ -4,6 +4,9 @@ pub const PROTO_MASK: u32 = 0x8000_0000;
 #[repr(u32)]
 pub enum EMsg {
     Multi = 1,
+    /// Server-initiated unified service notification (e.g. `FriendMessagesClient.IncomingMessage#1`).
+    /// Demultiplexed by `target_job_name`, NOT by a per-message EMsg.
+    ServiceMethod = 146,
     ServiceMethodResponse = 147,
     ServiceMethodCallFromClient = 151,
     ServiceMethodSendToClient = 152,
