@@ -188,20 +188,6 @@ struct AchievementDef {
     description: Option<String>,
 }
 
-/// Steam stores the stat type as a string ("4") OR occasionally as an int32.
-/// Type 4 = achievement stat.
-fn stat_type_is_achievement(stat_value: &KVValue) -> bool {
-    if let Some(t) = stat_value.get("type") {
-        if let Some(s) = t.as_str() {
-            return s.parse::<u32>().unwrap_or(0) == 4;
-        }
-        if let Some(i) = t.as_int() {
-            return i == 4;
-        }
-    }
-    false
-}
-
 /// The display "name" and "desc" fields are language-keyed nested blocks:
 ///   display { name { english "First Blood" french "Premier Sang" } }
 /// Fall back to plain-string form in case the game uses a simpler schema.
@@ -268,10 +254,10 @@ fn extract_achievements(root: &KVValue) -> Vec<AchievementDef> {
             Err(_) => continue,
         };
 
-        if !stat_type_is_achievement(stat_value) {
-            continue;
-        }
-
+        // Achievement stats are exactly those carrying a `bits` block (each bit = one
+        // achievement). The schema's `type` field is an unreliable discriminator — real schemas
+        // store it as a word ("INT", "FLOAT", …), not the numeric "4" — so the presence of `bits`
+        // is the gate.
         let bits_node = match stat_value.get("bits").and_then(|b| b.as_nested()) {
             Some(b) => b,
             None => continue,
@@ -423,5 +409,22 @@ mod tests {
         assert_eq!(second.apiname, "ACH_SECOND");
         assert!(!second.achieved);
         assert_eq!(second.unlocktime, 0);
+    }
+
+    /// Regression test against a real schema captured live from appid 410110
+    /// ("12 is Better Than 6"). Guards the parser against the real Steam binary-KV layout —
+    /// notably that a stat's `type` is a word ("INT"/"FLOAT"/…), so achievement stats must be
+    /// recognised by the presence of a `bits` block, not by `type == 4`.
+    #[test]
+    fn parses_real_captured_schema() {
+        let schema = include_bytes!("../tests/fixtures/userstats_schema_410110.bin");
+        // No unlock blocks supplied, so every achievement parses as locked — but all 46
+        // definitions must still be extracted with api names (and mostly display names).
+        let achievements = build_achievements(schema, &[]);
+        assert_eq!(achievements.len(), 46, "expected 46 achievement definitions");
+        assert!(achievements.iter().all(|a| !a.achieved && a.unlocktime == 0));
+        assert!(achievements.iter().all(|a| !a.apiname.is_empty()));
+        let named = achievements.iter().filter(|a| a.name.is_some()).count();
+        assert!(named >= 40, "expected most achievements to have display names, got {named}");
     }
 }

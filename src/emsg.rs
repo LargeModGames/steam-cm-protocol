@@ -5,6 +5,8 @@ pub const PROTO_MASK: u32 = 0x8000_0000;
 pub enum EMsg {
     Multi = 1,
     ServiceMethodResponse = 147,
+    ServiceMethodCallFromClient = 151,
+    ServiceMethodSendToClient = 152,
     ClientHeartBeat = 703,
     ClientChangeStatus = 716,
     ClientGamesPlayed = 742,
@@ -21,8 +23,6 @@ pub enum EMsg {
     ClientPICSProductInfoResponse = 8904,
     ClientPICSAccessTokenRequest = 8905,
     ClientPICSAccessTokenResponse = 8906,
-    ServiceMethodCallFromClient = 9802,
-    ServiceMethodSendToClient = 9803,
     ServiceMethodCallFromClientNonAuthed = 9804,
     ClientHello = 9805,
 }
