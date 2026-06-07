@@ -103,6 +103,15 @@ pub enum FriendsEvent {
         appid: u32,
         achievements: Vec<ProtocolAchievement>,
     },
+    /// A 1-on-1 friend message arrived (or a cross-session echo of our own send).
+    IncomingMessage(crate::chat::ChatMessage),
+    /// A friend started typing in the 1-on-1 conversation.
+    TypingNotification { steamid: u64 },
+    /// Result of a `GetRecentMessages` history fetch for one conversation (oldest first).
+    RecentMessages {
+        steamid: u64,
+        messages: Vec<crate::chat::ChatMessage>,
+    },
 }
 
 /// Decode a packet into a FriendsEvent, returning None for unrelated packets.
