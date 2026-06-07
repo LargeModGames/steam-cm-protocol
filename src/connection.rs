@@ -110,7 +110,7 @@ impl Connection {
                 match decode_frame(&binary) {
                     Ok(packets) => {
                         for packet in packets {
-                            // ServiceMethodSendToClient (9803) is a server push, not a
+                            // ServiceMethodSendToClient is a server push, not a
                             // response to a pending request. Never route it to pending jobs
                             // even if jobid_target happens to match — doing so would consume
                             // the pending slot and silently drop the real response.

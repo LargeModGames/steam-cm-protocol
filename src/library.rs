@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use crate::{
-    connection::Connection,
+    connection::{Connection, ConnectionState},
     error::Result,
     friends::ProtocolGame,
     pics::AppCatalogInfo,
     protobuf::{CPlayerGetLastPlayedTimesRequest, CPlayerGetLastPlayedTimesResponse},
-    service_method::{ServiceMethod, call},
+    service_method::{ServiceMethod, call_authed},
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -15,19 +15,18 @@ pub struct PlaytimeInfo {
     pub rtime_last_played: u32,
 }
 
-pub async fn get_last_played_times(connection: &Connection) -> Result<HashMap<u32, PlaytimeInfo>> {
-    // KNOWN LIMITATION (v0.2): this returns an empty list, so playtime shows 0 for every game.
-    // `CPlayer_GetLastPlayedTimes_Request` carries no steamid field, so the NonAuthed envelope has
-    // no user context and Steam replies with `games=0`. The authed envelope (9802) would carry the
-    // user, but Steam never sends a `ServiceMethodResponse` (147) for it — only a `9803` token push
-    // — so it times out. Real playtime needs a dedicated client EMsg (SteamKit2's path); tracked
-    // for a follow-up. NonAuthed is used here because it returns instantly instead of stalling the
-    // whole library load on a 10s timeout.
+pub async fn get_last_played_times(
+    connection: &Connection,
+    state: &ConnectionState,
+) -> Result<HashMap<u32, PlaytimeInfo>> {
     let method = ServiceMethod::new("Player.ClientGetLastPlayedTimes#1");
     let request = CPlayerGetLastPlayedTimesRequest {
         min_last_played: Some(0),
     };
-    let response: CPlayerGetLastPlayedTimesResponse = call(connection, &method, &request).await?;
+    tracing::info!("requesting last-played-times (authed)");
+    let response: CPlayerGetLastPlayedTimesResponse =
+        call_authed(connection, state, &method, &request).await?;
+    tracing::debug!(games = response.games.len(), "last-played-times response");
 
     let playtimes = response
         .games
