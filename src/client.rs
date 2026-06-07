@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::{
     sync::{Mutex, mpsc},
-    time::sleep,
+    time::{Duration, sleep, timeout},
 };
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -23,6 +24,15 @@ use crate::{
     serverlist::ServerListCache,
     token::steamid_from_refresh_token,
 };
+
+/// Bound the authed `ClientGetLastPlayedTimes` call — short, since Steam normally replies in well
+/// under a second; this only guards against a silent non-response.
+const PLAYTIME_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound the inline `GetUserStats` (achievements) call for the same reason.
+const ACHIEVEMENTS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall bound on waiting for Steam's post-login `ClientLicenseList` push (mirrors the old
+/// `GetOwnedGames` 30s bound) so a stalled/missed push fails the load instead of hanging forever.
+const LICENSE_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum RunCommand {
@@ -269,22 +279,29 @@ impl SteamClient {
                         Some(RunCommand::GetPlayerAchievements(appid)) => {
                             let conn = connection.lock().await;
                             let state = conn.state_snapshot().await;
-                            match achievements::get_player_achievements(&conn, &state, appid).await {
-                                Ok(achievements) => {
-                                    let _ = events.send(friends::FriendsEvent::PlayerAchievements {
-                                        appid,
-                                        achievements,
-                                    });
-                                }
-                                Err(e) => {
+                            // Runs inline in the command loop, so a hang would block every later
+                            // command until disconnect. Bound it and always emit a result so the
+                            // UI clears its loading state.
+                            let achievements = match timeout(
+                                ACHIEVEMENTS_TIMEOUT,
+                                achievements::get_player_achievements(&conn, &state, appid),
+                            )
+                            .await
+                            {
+                                Ok(Ok(achievements)) => achievements,
+                                Ok(Err(e)) => {
                                     tracing::warn!("GetPlayerAchievements({appid}) failed: {e}");
-                                    // Still emit an empty result so the UI clears any loading state.
-                                    let _ = events.send(friends::FriendsEvent::PlayerAchievements {
-                                        appid,
-                                        achievements: vec![],
-                                    });
+                                    vec![]
                                 }
-                            }
+                                Err(_) => {
+                                    tracing::warn!("GetPlayerAchievements({appid}) timed out");
+                                    vec![]
+                                }
+                            };
+                            let _ = events.send(friends::FriendsEvent::PlayerAchievements {
+                                appid,
+                                achievements,
+                            });
                         }
                         None => return Ok(()),
                     }
@@ -327,12 +344,27 @@ async fn load_library(
 
     let playtimes = {
         let conn = connection.lock().await;
-        let playtimes = library::get_last_played_times(&conn).await?;
-        tracing::info!(
-            games = playtimes.len(),
-            "ClientGetLastPlayedTimes returned playtime data"
-        );
-        playtimes
+        // Bounded so a silently-ignored service method can't freeze the whole pipeline. On
+        // timeout/error, load the library without playtime — names and icons still resolve.
+        match timeout(PLAYTIME_TIMEOUT, library::get_last_played_times(&conn)).await {
+            Ok(Ok(playtimes)) => {
+                tracing::info!(
+                    games = playtimes.len(),
+                    "ClientGetLastPlayedTimes returned playtime data"
+                );
+                playtimes
+            }
+            Ok(Err(error)) => {
+                tracing::warn!("ClientGetLastPlayedTimes failed: {error}");
+                HashMap::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ClientGetLastPlayedTimes timed out; loading library without playtime"
+                );
+                HashMap::new()
+            }
+        }
     };
     let recently_played = library::recently_played_games(&playtimes);
     let _ = events.send(friends::FriendsEvent::RecentlyPlayedGames(
@@ -356,19 +388,40 @@ async fn load_library(
 }
 
 async fn wait_for_package_ids(connection: &Arc<Mutex<Connection>>) -> Result<Vec<u32>> {
-    loop {
-        let notify = {
-            let conn = connection.lock().await;
-            let state = conn.state_snapshot().await;
-            if let Some(reason) = state.close_reason {
-                return Err(Error::Transport(reason));
+    let notify = {
+        let conn = connection.lock().await;
+        conn.license_notify()
+    };
+
+    let wait = async {
+        loop {
+            // Register interest BEFORE checking state. `notify_waiters()` stores no permit, so a
+            // notification that fires between the state read and the await would otherwise be
+            // missed. Enabling the future first closes that race.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            {
+                let conn = connection.lock().await;
+                let state = conn.state_snapshot().await;
+                if let Some(reason) = state.close_reason {
+                    return Err(Error::Transport(reason));
+                }
+                if state.license_list_received {
+                    return Ok(state.package_ids);
+                }
             }
-            if state.license_list_received {
-                return Ok(state.package_ids);
-            }
-            conn.license_notify()
-        };
-        notify.notified().await;
+
+            notified.await;
+        }
+    };
+
+    match timeout(LICENSE_LIST_TIMEOUT, wait).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Transport(
+            "timed out waiting for ClientLicenseList".to_owned(),
+        )),
     }
 }
 
