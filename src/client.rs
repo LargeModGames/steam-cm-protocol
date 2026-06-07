@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     achievements,
     auth::{credentials, qr},
+    chat,
     connection::Connection,
     emsg::EMsg,
     error::{Error, Result},
@@ -33,6 +34,10 @@ const ACHIEVEMENTS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall bound on waiting for Steam's post-login `ClientLicenseList` push (mirrors the old
 /// `GetOwnedGames` 30s bound) so a stalled/missed push fails the load instead of hanging forever.
 const LICENSE_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound the inline chat send/typing service calls (fast single round-trips).
+const CHAT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound the chat history fetch (runs in a spawned task; emits empty on timeout so the UI clears).
+const CHAT_HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum RunCommand {
@@ -40,6 +45,9 @@ pub enum RunCommand {
     RequestFriendData(Vec<u64>),
     GetLibrary,
     GetPlayerAchievements(u32),
+    SendMessage { steamid: u64, message: String },
+    SendTyping { steamid: u64 },
+    GetRecentMessages { steamid: u64 },
 }
 
 const PROTOCOL_VERSION: u32 = 65580;
@@ -239,6 +247,9 @@ impl SteamClient {
                                     }
                                 }
                                 let _ = events.send(event);
+                            } else if let Some(event) = chat::decode_incoming(&pkt) {
+                                // Unsolicited friend message / typing push (EMsg 146 ServiceMethod).
+                                let _ = events.send(event);
                             }
                         }
                         Some(Err(e)) => return Err(e),
@@ -301,6 +312,76 @@ impl SteamClient {
                             let _ = events.send(friends::FriendsEvent::PlayerAchievements {
                                 appid,
                                 achievements,
+                            });
+                        }
+                        Some(RunCommand::SendMessage { steamid, message }) => {
+                            // Inline single round-trip (mirrors GetPlayerAchievements). Bounded so a
+                            // silent non-response can't wedge later commands; failures are logged.
+                            let conn = connection.lock().await;
+                            let state = conn.state_snapshot().await;
+                            match timeout(
+                                CHAT_SEND_TIMEOUT,
+                                chat::send_message(&conn, &state, steamid, message),
+                            )
+                            .await
+                            {
+                                Ok(Ok(sent)) => {
+                                    let _ = events.send(friends::FriendsEvent::MessageSent(sent));
+                                }
+                                Ok(Err(e)) => tracing::warn!("SendMessage({steamid}) failed: {e}"),
+                                Err(_) => tracing::warn!("SendMessage({steamid}) timed out"),
+                            }
+                        }
+                        Some(RunCommand::SendTyping { steamid }) => {
+                            // Fire-and-forget in a spawned task: typing pings are high-frequency and
+                            // best-effort, so they must never block the receive path or later
+                            // commands the way an inline round-trip would. Ordering is irrelevant.
+                            let connection_clone = Arc::clone(&connection);
+                            tokio::spawn(async move {
+                                let conn = connection_clone.lock().await;
+                                let state = conn.state_snapshot().await;
+                                match timeout(
+                                    CHAT_SEND_TIMEOUT,
+                                    chat::send_typing(&conn, &state, steamid),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => tracing::debug!("SendTyping({steamid}) failed: {e}"),
+                                    Err(_) => tracing::debug!("SendTyping({steamid}) timed out"),
+                                }
+                            });
+                        }
+                        Some(RunCommand::GetRecentMessages { steamid }) => {
+                            // Spawn (mirrors GetLibrary) so a slow history fetch can't block the
+                            // select loop. Always emit a result so the UI clears its loading state.
+                            let connection_clone = Arc::clone(&connection);
+                            let events_clone = events.clone();
+                            tokio::spawn(async move {
+                                let messages = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    match timeout(
+                                        CHAT_HISTORY_TIMEOUT,
+                                        chat::get_recent_messages(&conn, &state, steamid),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(messages)) => messages,
+                                        Ok(Err(e)) => {
+                                            tracing::warn!("GetRecentMessages({steamid}) failed: {e}");
+                                            vec![]
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!("GetRecentMessages({steamid}) timed out");
+                                            vec![]
+                                        }
+                                    }
+                                };
+                                let _ = events_clone.send(friends::FriendsEvent::RecentMessages {
+                                    steamid,
+                                    messages,
+                                });
                             });
                         }
                         None => return Ok(()),
@@ -562,6 +643,11 @@ async fn log_on_with_token(
         supports_rate_limit_response: Some(true),
         access_token: Some(refresh_token.to_owned()),
         gaming_device_type: Some(DEFAULT_GAMING_DEVICE_TYPE),
+        // Opt into Steam's "new chat" (unified ChatRoom/FriendMessages). This is the *only*
+        // opt-in for real-time message pushes: without it Steam does not push
+        // `FriendMessagesClient.IncomingMessage#1` to this session (matches node-steam-user, which
+        // sets `chat_mode: 2`). Sending and history fetch work without it; live receive does not.
+        chat_mode: Some(2),
         ..Default::default()
     };
 
