@@ -2,9 +2,9 @@
 //!
 //! Mirrors the `library.rs` / `service_method.rs` pattern: outbound requests go through
 //! `call_authed` (`ServiceMethodCallFromClient`, EMsg 151 → `ServiceMethodResponse` 147), and
-//! incoming messages arrive unsolicited as a `ServiceMethodSendToClient` (EMsg 152) server push.
-//! No new EMsg constants and no subscribe call are needed — Steam pushes friend messages to any
-//! logged-on client automatically.
+//! incoming messages arrive unsolicited as a `ServiceMethod` (EMsg 146) server push, identified by
+//! `target_job_name`. No per-conversation subscribe is needed, but the logon MUST set
+//! `chat_mode = 2` (see `client.rs`) or Steam never pushes friend messages to the session.
 
 use crate::{
     connection::{Connection, ConnectionState},
@@ -25,7 +25,7 @@ use crate::{
 pub const CHAT_ENTRY_TEXT: i32 = 1;
 pub const CHAT_ENTRY_TYPING: i32 = 2;
 
-/// Job name carried by the incoming-message server push (EMsg 152).
+/// Job name carried by the incoming-message server push (EMsg 146 `ServiceMethod`).
 const INCOMING_MESSAGE_JOB: &str = "FriendMessagesClient.IncomingMessage#1";
 
 /// A single 1-on-1 chat message, normalised for the UI/cache layers.
@@ -101,12 +101,15 @@ pub async fn get_recent_messages(
     Ok(recent_to_messages(response, steamid, state.steamid))
 }
 
-/// Decode an incoming friend-message server push (EMsg 152). Returns `None` for any other 152
-/// push (reactions, session notices, group-chat client pushes) so the run loop ignores them.
+/// Decode an incoming friend-message server push. Steam delivers server-initiated unified
+/// notifications as EMsg `ServiceMethod` (146) — NOT `ServiceMethodSendToClient` (152) — and
+/// demultiplexes them purely by `target_job_name` (verified against node-steam-user and SteamKit).
+/// Accept both EMsgs and gate on the job name; return `None` for any other push (reactions,
+/// session notices, group-chat client pushes) so the run loop ignores them.
 pub fn decode_incoming(packet: &Packet) -> Option<FriendsEvent> {
-    if packet.emsg != EMsg::ServiceMethodSendToClient.raw()
-        || packet.target_job_name() != Some(INCOMING_MESSAGE_JOB)
-    {
+    let is_service_push = packet.emsg == EMsg::ServiceMethod.raw()
+        || packet.emsg == EMsg::ServiceMethodSendToClient.raw();
+    if !is_service_push || packet.target_job_name() != Some(INCOMING_MESSAGE_JOB) {
         return None;
     }
     let notification = packet
@@ -186,12 +189,16 @@ mod tests {
     const SELF_STEAMID: u64 = 76561198000000001;
     const PARTNER_STEAMID: u64 = 76561198000000002;
 
-    fn incoming_packet(job: &str, notification: &CFriendMessagesIncomingMessageNotification) -> Packet {
+    fn incoming_packet(
+        emsg: EMsg,
+        job: &str,
+        notification: &CFriendMessagesIncomingMessageNotification,
+    ) -> Packet {
         let header = CMsgProtoBufHeader {
             target_job_name: Some(job.to_owned()),
             ..Default::default()
         };
-        let encoded = encode_message(EMsg::ServiceMethodSendToClient, &header, notification).unwrap();
+        let encoded = encode_message(emsg, &header, notification).unwrap();
         decode_frame(&encoded)
             .unwrap()
             .into_iter()
@@ -255,7 +262,8 @@ mod tests {
             local_echo: Some(false),
             ..Default::default()
         };
-        let packet = incoming_packet(INCOMING_MESSAGE_JOB, &notification);
+        // Real-world pushes arrive as EMsg ServiceMethod (146), keyed by target_job_name.
+        let packet = incoming_packet(EMsg::ServiceMethod, INCOMING_MESSAGE_JOB, &notification);
         match decode_incoming(&packet) {
             Some(FriendsEvent::IncomingMessage(m)) => {
                 assert_eq!(m.steamid, PARTNER_STEAMID);
@@ -269,13 +277,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_incoming_text_message_via_send_to_client() {
+        // Defensive: also accept the rarer ServiceMethodSendToClient (152) EMsg.
+        let notification = CFriendMessagesIncomingMessageNotification {
+            steamid_friend: Some(PARTNER_STEAMID),
+            chat_entry_type: Some(CHAT_ENTRY_TEXT),
+            message: Some("hello".to_owned()),
+            rtime32_server_timestamp: Some(1000),
+            ordinal: Some(2),
+            local_echo: Some(false),
+            ..Default::default()
+        };
+        let packet =
+            incoming_packet(EMsg::ServiceMethodSendToClient, INCOMING_MESSAGE_JOB, &notification);
+        assert!(matches!(
+            decode_incoming(&packet),
+            Some(FriendsEvent::IncomingMessage(_))
+        ));
+    }
+
+    #[test]
     fn decodes_incoming_typing() {
         let notification = CFriendMessagesIncomingMessageNotification {
             steamid_friend: Some(PARTNER_STEAMID),
             chat_entry_type: Some(CHAT_ENTRY_TYPING),
             ..Default::default()
         };
-        let packet = incoming_packet(INCOMING_MESSAGE_JOB, &notification);
+        let packet = incoming_packet(EMsg::ServiceMethod, INCOMING_MESSAGE_JOB, &notification);
         match decode_incoming(&packet) {
             Some(FriendsEvent::TypingNotification { steamid }) => assert_eq!(steamid, PARTNER_STEAMID),
             other => panic!("expected TypingNotification, got {other:?}"),
@@ -290,7 +318,11 @@ mod tests {
             message: Some("from a group".to_owned()),
             ..Default::default()
         };
-        let packet = incoming_packet("ChatRoomClient.NotifyIncomingChatMessage#1", &notification);
+        let packet = incoming_packet(
+            EMsg::ServiceMethod,
+            "ChatRoomClient.NotifyIncomingChatMessage#1",
+            &notification,
+        );
         assert!(decode_incoming(&packet).is_none());
     }
 
