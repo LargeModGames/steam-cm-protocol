@@ -42,26 +42,27 @@ pub struct ChatMessage {
     pub from_local: bool,
 }
 
-/// Send a text message to `steamid`.
+/// Send a text message to `steamid`, returning the confirmed message stamped with Steam's
+/// authoritative `server_timestamp` + `ordinal` (the same `(timestamp, ordinal)` key the message
+/// later carries in history and cross-session echoes — so callers can dedupe without heuristics).
 pub async fn send_message(
     connection: &Connection,
     state: &ConnectionState,
     steamid: u64,
     message: String,
-) -> Result<()> {
+) -> Result<ChatMessage> {
     let method = ServiceMethod::new("FriendMessages.SendMessage#1");
     let request = CFriendMessagesSendMessageRequest {
         steamid: Some(steamid),
         chat_entry_type: Some(CHAT_ENTRY_TEXT),
-        message: Some(message),
+        message: Some(message.clone()),
         // Send the raw text verbatim; brackets render literally in the terminal.
         contains_bbcode: Some(false),
         ..Default::default()
     };
-    // Body is ignored: the 147 response itself is the send confirmation.
-    let _response: CFriendMessagesSendMessageResponse =
+    let response: CFriendMessagesSendMessageResponse =
         call_authed(connection, state, &method, &request).await?;
-    Ok(())
+    Ok(sent_message(steamid, message, response))
 }
 
 /// Send a typing indicator to `steamid` (best-effort).
@@ -124,6 +125,25 @@ pub fn decode_incoming(packet: &Packet) -> Option<FriendsEvent> {
         })),
         CHAT_ENTRY_TYPING => Some(FriendsEvent::TypingNotification { steamid: partner }),
         _ => None,
+    }
+}
+
+/// Build the confirmed `ChatMessage` for one of our own sends from the SendMessage response.
+fn sent_message(
+    steamid: u64,
+    original: String,
+    response: CFriendMessagesSendMessageResponse,
+) -> ChatMessage {
+    ChatMessage {
+        steamid,
+        // Steam may normalise the message (e.g. bbcode); prefer its version when present.
+        message: response
+            .modified_message
+            .filter(|m| !m.is_empty())
+            .unwrap_or(original),
+        timestamp: response.server_timestamp.unwrap_or(0),
+        ordinal: response.ordinal.unwrap_or(0),
+        from_local: true,
     }
 }
 
@@ -193,6 +213,35 @@ mod tests {
         assert_eq!(back.steamid, Some(PARTNER_STEAMID));
         assert_eq!(back.message.as_deref(), Some("hi there"));
         assert_eq!(back.chat_entry_type, Some(CHAT_ENTRY_TEXT));
+    }
+
+    #[test]
+    fn sent_message_uses_server_stamp_and_modified_text() {
+        let response = CFriendMessagesSendMessageResponse {
+            modified_message: Some("hi &lt;there&gt;".to_owned()),
+            server_timestamp: Some(1717),
+            ordinal: Some(3),
+            ..Default::default()
+        };
+        let sent = sent_message(PARTNER_STEAMID, "hi <there>".to_owned(), response);
+        assert_eq!(sent.steamid, PARTNER_STEAMID);
+        assert_eq!(sent.message, "hi &lt;there&gt;");
+        assert_eq!(sent.timestamp, 1717);
+        assert_eq!(sent.ordinal, 3);
+        assert!(sent.from_local);
+    }
+
+    #[test]
+    fn sent_message_falls_back_to_original_when_unmodified() {
+        let response = CFriendMessagesSendMessageResponse {
+            server_timestamp: Some(42),
+            ordinal: Some(0),
+            ..Default::default()
+        };
+        let sent = sent_message(PARTNER_STEAMID, "plain".to_owned(), response);
+        assert_eq!(sent.message, "plain");
+        assert_eq!(sent.timestamp, 42);
+        assert!(sent.from_local);
     }
 
     #[test]

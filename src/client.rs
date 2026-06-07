@@ -325,7 +325,9 @@ impl SteamClient {
                             )
                             .await
                             {
-                                Ok(Ok(())) => {}
+                                Ok(Ok(sent)) => {
+                                    let _ = events.send(friends::FriendsEvent::MessageSent(sent));
+                                }
                                 Ok(Err(e)) => tracing::warn!("SendMessage({steamid}) failed: {e}"),
                                 Err(_) => tracing::warn!("SendMessage({steamid}) timed out"),
                             }
