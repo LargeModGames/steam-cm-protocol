@@ -25,14 +25,6 @@ impl KVValue {
         }
     }
 
-    pub(crate) fn as_int(&self) -> Option<i32> {
-        if let KVValue::Int(i) = self {
-            Some(*i)
-        } else {
-            None
-        }
-    }
-
     pub(crate) fn as_u32(&self) -> Option<u32> {
         match self {
             KVValue::Int(i) => (*i >= 0).then_some(*i as u32),
