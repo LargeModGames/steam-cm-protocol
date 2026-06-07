@@ -79,6 +79,9 @@ pub struct ProtocolGame {
     pub playtime_forever: i32,
     pub rtime_last_played: u32,
     pub img_icon_url: Option<String>,
+    /// Steam appinfo `common.type` (lowercased): "game", "application", "tool", … `None` when
+    /// the appinfo could not be resolved. Used by the TUI to filter the library by type.
+    pub app_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]

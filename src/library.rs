@@ -16,6 +16,13 @@ pub struct PlaytimeInfo {
 }
 
 pub async fn get_last_played_times(connection: &Connection) -> Result<HashMap<u32, PlaytimeInfo>> {
+    // KNOWN LIMITATION (v0.2): this returns an empty list, so playtime shows 0 for every game.
+    // `CPlayer_GetLastPlayedTimes_Request` carries no steamid field, so the NonAuthed envelope has
+    // no user context and Steam replies with `games=0`. The authed envelope (9802) would carry the
+    // user, but Steam never sends a `ServiceMethodResponse` (147) for it — only a `9803` token push
+    // — so it times out. Real playtime needs a dedicated client EMsg (SteamKit2's path); tracked
+    // for a follow-up. NonAuthed is used here because it returns instantly instead of stalling the
+    // whole library load on a 10s timeout.
     let method = ServiceMethod::new("Player.ClientGetLastPlayedTimes#1");
     let request = CPlayerGetLastPlayedTimesRequest {
         min_last_played: Some(0),
@@ -50,6 +57,7 @@ pub fn recently_played_games(playtimes: &HashMap<u32, PlaytimeInfo>) -> Vec<Prot
             playtime_forever: playtime.playtime_forever,
             rtime_last_played: playtime.rtime_last_played,
             img_icon_url: None,
+            app_type: None,
         })
         .collect();
     games.sort_by(|a, b| {
@@ -74,6 +82,7 @@ pub fn merge_catalog_and_playtimes(
                 playtime_forever: playtime.playtime_forever,
                 rtime_last_played: playtime.rtime_last_played,
                 img_icon_url: app.img_icon_url,
+                app_type: app.app_type,
             }
         })
         .collect();
@@ -98,11 +107,13 @@ mod tests {
                 appid: 20,
                 name: "Played".to_owned(),
                 img_icon_url: Some("icon".to_owned()),
+                app_type: Some("game".to_owned()),
             },
             AppCatalogInfo {
                 appid: 10,
                 name: "Never Played".to_owned(),
                 img_icon_url: None,
+                app_type: Some("game".to_owned()),
             },
         ];
         let playtimes = HashMap::from([(

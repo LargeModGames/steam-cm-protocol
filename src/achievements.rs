@@ -6,7 +6,7 @@ use crate::{
     friends::ProtocolAchievement,
     kv::{self, KVValue},
     protobuf::{CPlayerGetUserStatsRequest, CPlayerGetUserStatsResponse},
-    service_method::{ServiceMethod, call_authed},
+    service_method::{ServiceMethod, call},
 };
 
 pub async fn get_player_achievements(
@@ -25,8 +25,13 @@ pub async fn get_player_achievements(
         ..Default::default()
     };
 
-    let response: CPlayerGetUserStatsResponse =
-        call_authed(connection, state, &method, &request).await?;
+    // KNOWN LIMITATION (v0.2): this returns no achievements. The authed envelope (9802) gets no
+    // `ServiceMethodResponse` (147) from Steam — only a `9803` token push — so it times out;
+    // the NonAuthed envelope (used here, so it fails fast instead of stalling) responds but with an
+    // empty schema, since a session with no authed identity is not given user-private stats. The
+    // working path is the dedicated `ClientGetUserStats` EMsg (SteamKit2); the binary-KV schema
+    // parser below already targets that format. Tracked for a follow-up.
+    let response: CPlayerGetUserStatsResponse = call(connection, &method, &request).await?;
 
     let schema_bytes = response.schema.unwrap_or_default();
     if schema_bytes.is_empty() {
@@ -36,7 +41,15 @@ pub async fn get_player_achievements(
     // Parse the binary KV schema to extract achievement definitions.
     let defs = match parse_achievement_schema(&schema_bytes) {
         Ok(d) => d,
-        Err(_) => return Ok(vec![]),
+        Err(error) => {
+            tracing::warn!(
+                appid,
+                schema_len = schema_bytes.len(),
+                %error,
+                "achievement schema parse failed"
+            );
+            return Ok(vec![]);
+        }
     };
 
     if defs.is_empty() {
