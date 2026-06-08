@@ -7,6 +7,7 @@ use crate::{
     connection::{Connection, ConnectionState},
     emsg::EMsg,
     error::{Error, Result},
+    friends::LaunchEntry,
     kv::{self, KVValue},
     protobuf::{
         CMsgClientPicsAccessTokenRequest, CMsgClientPicsAccessTokenResponse,
@@ -27,6 +28,10 @@ pub struct AppCatalogInfo {
     /// Steam appinfo `common.type`, lowercased ("game", "application", "tool", "dlc", …).
     /// `None` when the app's product info was never resolved or carried no type.
     pub app_type: Option<String>,
+    /// Appinfo `config.installdir` — the game's folder name under `steamapps/common/`.
+    pub installdir: Option<String>,
+    /// Appinfo `config/launch` entries — used by the direct (no-Steam) launch path.
+    pub launch: Vec<LaunchEntry>,
 }
 
 /// Library entries we surface: real games plus owned software/tools. DLC, soundtracks (music),
@@ -239,6 +244,8 @@ async fn resolve_app_infos(
                     name: String::new(),
                     img_icon_url: None,
                     app_type: None,
+                    installdir: None,
+                    launch: Vec::new(),
                 },
             )
         })
@@ -464,12 +471,61 @@ fn parse_binary_app_info(appid: u32, buffer: &[u8]) -> Option<AppCatalogInfo> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
 
+    let config = root
+        .get("appinfo")
+        .and_then(|appinfo| appinfo.get("config"))
+        .or_else(|| root.get("config"));
+    let installdir = config
+        .and_then(|config| config.get("installdir"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let launch = config
+        .and_then(|config| config.get("launch"))
+        .map(launch_entries_from_kv)
+        .unwrap_or_default();
+
     Some(AppCatalogInfo {
         appid,
         name: name.to_owned(),
         img_icon_url: icon,
         app_type,
+        installdir,
+        launch,
     })
+}
+
+/// Collect `config/launch` entries from a binary-KV `launch` node (numbered children `0`, `1`, …).
+fn launch_entries_from_kv(launch: &KVValue) -> Vec<LaunchEntry> {
+    let Some(children) = launch.as_nested() else {
+        return Vec::new();
+    };
+    children
+        .iter()
+        .filter_map(|(_, entry)| {
+            let executable = entry
+                .get("executable")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())?
+                .to_owned();
+            let cfg = entry.get("config");
+            let str_field = |node: Option<&KVValue>, key: &str| {
+                node.and_then(|node| node.get(key))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            Some(LaunchEntry {
+                executable,
+                arguments: str_field(Some(entry), "arguments"),
+                workingdir: str_field(Some(entry), "workingdir"),
+                launch_type: str_field(Some(entry), "type"),
+                oslist: str_field(cfg, "oslist"),
+                osarch: str_field(cfg, "osarch"),
+                betakey: str_field(cfg, "betakey"),
+            })
+        })
+        .collect()
 }
 
 fn parse_text_app_info(appid: u32, buffer: &[u8]) -> Option<AppCatalogInfo> {
@@ -492,12 +548,59 @@ fn parse_text_app_info(appid: u32, buffer: &[u8]) -> Option<AppCatalogInfo> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
 
+    let config = root
+        .get_node("appinfo")
+        .and_then(|appinfo| appinfo.get_node("config"))
+        .or_else(|| root.get_node("config"));
+    let installdir = config
+        .and_then(|config| config.get_str("installdir"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let launch = config
+        .and_then(|config| config.get_node("launch"))
+        .map(launch_entries_from_vdf)
+        .unwrap_or_default();
+
     Some(AppCatalogInfo {
         appid,
         name: name.to_owned(),
         img_icon_url: icon,
         app_type,
+        installdir,
+        launch,
     })
+}
+
+/// Collect `config/launch` entries from a text-VDF `launch` node (numbered child nodes).
+fn launch_entries_from_vdf(launch: &VdfNode) -> Vec<LaunchEntry> {
+    launch
+        .values
+        .iter()
+        .filter_map(|(_, value)| match value {
+            VdfValue::Node(entry) => {
+                let executable = entry
+                    .get_str("executable")
+                    .filter(|value| !value.is_empty())?
+                    .to_owned();
+                let cfg = entry.get_node("config");
+                let str_field = |node: Option<&VdfNode>, key: &str| {
+                    node.and_then(|node| node.get_str(key))
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                };
+                Some(LaunchEntry {
+                    executable,
+                    arguments: str_field(Some(entry), "arguments"),
+                    workingdir: str_field(Some(entry), "workingdir"),
+                    launch_type: str_field(Some(entry), "type"),
+                    oslist: str_field(cfg, "oslist"),
+                    osarch: str_field(cfg, "osarch"),
+                    betakey: str_field(cfg, "betakey"),
+                })
+            }
+            VdfValue::Str(_) => None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -670,6 +773,8 @@ mod tests {
             name: name.to_owned(),
             img_icon_url: None,
             app_type: app_type.map(str::to_owned),
+            installdir: None,
+            launch: Vec::new(),
         }
     }
 
@@ -744,5 +849,80 @@ mod tests {
 
         let app = parse_app_info(502500, data).expect("app info should parse");
         assert_eq!(app.name, "ACE COMBAT\u{2122}7: SKIES UNKNOWN");
+    }
+
+    #[test]
+    fn parses_installdir_and_launch_from_text_config() {
+        let data = br#"
+            "appinfo"
+            {
+                "common" { "name" "Portal" "type" "game" }
+                "config"
+                {
+                    "installdir" "Portal"
+                    "launch"
+                    {
+                        "0"
+                        {
+                            "executable" "hl2.exe"
+                            "arguments" "-game portal"
+                            "type" "default"
+                            "config" { "oslist" "windows" "osarch" "64" }
+                        }
+                        "1"
+                        {
+                            "executable" "hl2_linux"
+                            "config" { "oslist" "linux" }
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let app = parse_app_info(400, data).expect("app info should parse");
+        assert_eq!(app.installdir.as_deref(), Some("Portal"));
+        assert_eq!(app.launch.len(), 2);
+        assert_eq!(app.launch[0].executable, "hl2.exe");
+        assert_eq!(app.launch[0].arguments.as_deref(), Some("-game portal"));
+        assert_eq!(app.launch[0].launch_type.as_deref(), Some("default"));
+        assert_eq!(app.launch[0].oslist.as_deref(), Some("windows"));
+        assert_eq!(app.launch[0].osarch.as_deref(), Some("64"));
+        assert_eq!(app.launch[1].executable, "hl2_linux");
+        assert_eq!(app.launch[1].oslist.as_deref(), Some("linux"));
+        // No common.type changes; still a launchable game.
+        assert!(is_library_entry(&app));
+    }
+
+    #[test]
+    fn launch_entries_from_kv_reads_numbered_children() {
+        // Mirrors the binary-KV path: a `launch` node with numbered child entries.
+        let entry0 = KVValue::Nested(vec![
+            ("executable".to_owned(), KVValue::Str("bin/game.exe".to_owned())),
+            ("workingdir".to_owned(), KVValue::Str("bin".to_owned())),
+            (
+                "config".to_owned(),
+                KVValue::Nested(vec![
+                    ("oslist".to_owned(), KVValue::Str("windows".to_owned())),
+                    ("osarch".to_owned(), KVValue::Str("64".to_owned())),
+                ]),
+            ),
+        ]);
+        // An entry with no executable must be skipped.
+        let entry1 = KVValue::Nested(vec![(
+            "description".to_owned(),
+            KVValue::Str("placeholder".to_owned()),
+        )]);
+        let launch = KVValue::Nested(vec![
+            ("0".to_owned(), entry0),
+            ("1".to_owned(), entry1),
+        ]);
+
+        let entries = launch_entries_from_kv(&launch);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].executable, "bin/game.exe");
+        assert_eq!(entries[0].workingdir.as_deref(), Some("bin"));
+        assert_eq!(entries[0].oslist.as_deref(), Some("windows"));
+        assert_eq!(entries[0].osarch.as_deref(), Some("64"));
+        assert_eq!(entries[0].arguments, None);
     }
 }

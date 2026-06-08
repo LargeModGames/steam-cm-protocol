@@ -72,6 +72,26 @@ pub struct Persona {
     pub game_fields_present: bool,
 }
 
+/// One entry from an app's PICS `config/launch` block — how Steam itself would start the game.
+/// Used by the direct (no-Steam) launch path to resolve the executable without the Steam client.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchEntry {
+    /// Executable path, relative to the game's install directory (e.g. `bin/game.exe`).
+    pub executable: String,
+    /// Launch arguments, if any.
+    pub arguments: Option<String>,
+    /// Working directory, relative to the install directory; `None` means the install root.
+    pub workingdir: Option<String>,
+    /// `config/launch[i].type` — "default", "none", "config", … `None`/empty when unset.
+    pub launch_type: Option<String>,
+    /// `config/launch[i].config.oslist` — comma list ("windows", "linux", "macos").
+    pub oslist: Option<String>,
+    /// `config/launch[i].config.osarch` — "32" / "64".
+    pub osarch: Option<String>,
+    /// `config/launch[i].config.betakey` — present only for beta-gated launch options.
+    pub betakey: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtocolGame {
     pub appid: u32,
@@ -82,6 +102,11 @@ pub struct ProtocolGame {
     /// Steam appinfo `common.type` (lowercased): "game", "application", "tool", … `None` when
     /// the appinfo could not be resolved. Used by the TUI to filter the library by type.
     pub app_type: Option<String>,
+    /// Appinfo `config.installdir` — the game's folder name under `steamapps/common/`. `None`
+    /// when unresolved or for the recently-played / Web-API fallback paths.
+    pub installdir: Option<String>,
+    /// Appinfo `config/launch` entries (how Steam would launch it). Empty when unresolved.
+    pub launch: Vec<LaunchEntry>,
 }
 
 #[derive(Debug, Clone)]

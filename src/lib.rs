@@ -27,4 +27,6 @@ pub mod transport {
 pub use chat::ChatMessage;
 pub use client::{AuthEvent, AuthMethod, GuardKind, LoggedOn, RunCommand, SteamClient};
 pub use error::{Error, Result};
-pub use friends::{Friend, FriendsEvent, Persona, PersonaState, ProtocolAchievement, ProtocolGame};
+pub use friends::{
+    Friend, FriendsEvent, LaunchEntry, Persona, PersonaState, ProtocolAchievement, ProtocolGame,
+};
