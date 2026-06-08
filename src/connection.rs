@@ -118,7 +118,8 @@ impl Connection {
                             // drop the real response. (Responses are `ServiceMethodResponse` 147.)
                             let is_server_push = packet.emsg
                                 == crate::emsg::EMsg::ServiceMethod.raw()
-                                || packet.emsg == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
+                                || packet.emsg
+                                    == crate::emsg::EMsg::ServiceMethodSendToClient.raw();
 
                             if !is_server_push && let Some(job_id) = packet.jobid_target() {
                                 let waiter = {

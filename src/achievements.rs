@@ -421,10 +421,21 @@ mod tests {
         // No unlock blocks supplied, so every achievement parses as locked — but all 46
         // definitions must still be extracted with api names (and mostly display names).
         let achievements = build_achievements(schema, &[]);
-        assert_eq!(achievements.len(), 46, "expected 46 achievement definitions");
-        assert!(achievements.iter().all(|a| !a.achieved && a.unlocktime == 0));
+        assert_eq!(
+            achievements.len(),
+            46,
+            "expected 46 achievement definitions"
+        );
+        assert!(
+            achievements
+                .iter()
+                .all(|a| !a.achieved && a.unlocktime == 0)
+        );
         assert!(achievements.iter().all(|a| !a.apiname.is_empty()));
         let named = achievements.iter().filter(|a| a.name.is_some()).count();
-        assert!(named >= 40, "expected most achievements to have display names, got {named}");
+        assert!(
+            named >= 40,
+            "expected most achievements to have display names, got {named}"
+        );
     }
 }

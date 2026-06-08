@@ -134,7 +134,9 @@ pub enum FriendsEvent {
     /// `server_timestamp` + `ordinal` (so the UI can append/dedupe it like any other message).
     MessageSent(crate::chat::ChatMessage),
     /// A friend started typing in the 1-on-1 conversation.
-    TypingNotification { steamid: u64 },
+    TypingNotification {
+        steamid: u64,
+    },
     /// Result of a `GetRecentMessages` history fetch for one conversation (oldest first).
     RecentMessages {
         steamid: u64,
@@ -227,12 +229,14 @@ mod tests {
     #[test]
     fn decodes_persona_state_into_friends_event() {
         let mut friend = CMsgClientPersonaState::default();
-        let mut f = crate::protobuf::c_msg_client_persona_state::Friend::default();
-        f.friendid = Some(76561198000000001);
-        f.player_name = Some("Alice".to_owned());
-        f.persona_state = Some(1); // Online
-        f.game_name = Some("Half-Life 2".to_owned());
-        f.game_played_app_id = Some(220);
+        let f = crate::protobuf::c_msg_client_persona_state::Friend {
+            friendid: Some(76561198000000001),
+            player_name: Some("Alice".to_owned()),
+            persona_state: Some(1), // Online
+            game_name: Some("Half-Life 2".to_owned()),
+            game_played_app_id: Some(220),
+            ..Default::default()
+        };
         friend.friends.push(f);
 
         let header = CMsgProtoBufHeader::default();
@@ -259,13 +263,15 @@ mod tests {
     fn filters_non_friend_relationships() {
         let mut msg = crate::protobuf::CMsgClientFriendsList::default();
         // relationship 3 = Friend, 1 = Blocked
-        let mut friend_entry = crate::protobuf::c_msg_client_friends_list::Friend::default();
-        friend_entry.ulfriendid = Some(76561198000000002);
-        friend_entry.efriendrelationship = Some(3);
+        let friend_entry = crate::protobuf::c_msg_client_friends_list::Friend {
+            ulfriendid: Some(76561198000000002),
+            efriendrelationship: Some(3),
+        };
         msg.friends.push(friend_entry);
-        let mut blocked_entry = crate::protobuf::c_msg_client_friends_list::Friend::default();
-        blocked_entry.ulfriendid = Some(76561198000000099);
-        blocked_entry.efriendrelationship = Some(1);
+        let blocked_entry = crate::protobuf::c_msg_client_friends_list::Friend {
+            ulfriendid: Some(76561198000000099),
+            efriendrelationship: Some(1),
+        };
         msg.friends.push(blocked_entry);
 
         let header = CMsgProtoBufHeader::default();
