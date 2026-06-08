@@ -781,16 +781,36 @@ mod tests {
     #[test]
     fn type_filter_keeps_games_software_tools_and_named_untyped() {
         // Kept: games, software/applications, tools.
-        assert!(is_library_entry(&catalog_app(1, "Elden Ring", Some("game"))));
-        assert!(is_library_entry(&catalog_app(2, "Wallpaper Engine", Some("application"))));
+        assert!(is_library_entry(&catalog_app(
+            1,
+            "Elden Ring",
+            Some("game")
+        )));
+        assert!(is_library_entry(&catalog_app(
+            2,
+            "Wallpaper Engine",
+            Some("application")
+        )));
         assert!(is_library_entry(&catalog_app(3, "SteamVR", Some("tool"))));
         // Kept: a named app whose type we couldn't resolve (parse miss must not lose a real game).
         assert!(is_library_entry(&catalog_app(4, "Mystery Game", None)));
 
         // Dropped: DLC/soundtracks/videos/demos/configs.
-        assert!(!is_library_entry(&catalog_app(5, "Shadow of the Erdtree", Some("dlc"))));
-        assert!(!is_library_entry(&catalog_app(6, "Original Soundtrack", Some("music"))));
-        assert!(!is_library_entry(&catalog_app(7, "Launch Trailer", Some("video"))));
+        assert!(!is_library_entry(&catalog_app(
+            5,
+            "Shadow of the Erdtree",
+            Some("dlc")
+        )));
+        assert!(!is_library_entry(&catalog_app(
+            6,
+            "Original Soundtrack",
+            Some("music")
+        )));
+        assert!(!is_library_entry(&catalog_app(
+            7,
+            "Launch Trailer",
+            Some("video")
+        )));
         assert!(!is_library_entry(&catalog_app(8, "Playtest", Some("demo"))));
         // Dropped: never-resolved empty row (no type, no name).
         assert!(!is_library_entry(&catalog_app(9, "", None)));
@@ -897,7 +917,10 @@ mod tests {
     fn launch_entries_from_kv_reads_numbered_children() {
         // Mirrors the binary-KV path: a `launch` node with numbered child entries.
         let entry0 = KVValue::Nested(vec![
-            ("executable".to_owned(), KVValue::Str("bin/game.exe".to_owned())),
+            (
+                "executable".to_owned(),
+                KVValue::Str("bin/game.exe".to_owned()),
+            ),
             ("workingdir".to_owned(), KVValue::Str("bin".to_owned())),
             (
                 "config".to_owned(),
@@ -912,10 +935,7 @@ mod tests {
             "description".to_owned(),
             KVValue::Str("placeholder".to_owned()),
         )]);
-        let launch = KVValue::Nested(vec![
-            ("0".to_owned(), entry0),
-            ("1".to_owned(), entry1),
-        ]);
+        let launch = KVValue::Nested(vec![("0".to_owned(), entry0), ("1".to_owned(), entry1)]);
 
         let entries = launch_entries_from_kv(&launch);
         assert_eq!(entries.len(), 1);
