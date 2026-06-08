@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod achievements;
 pub mod auth {
     pub mod credentials;

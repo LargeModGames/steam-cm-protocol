@@ -173,7 +173,11 @@ fn recent_to_messages(
         })
         .collect();
     // Steam does not guarantee ordering; sort oldest-first for display.
-    messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.ordinal.cmp(&b.ordinal)));
+    messages.sort_by(|a, b| {
+        a.timestamp
+            .cmp(&b.timestamp)
+            .then(a.ordinal.cmp(&b.ordinal))
+    });
     messages
 }
 
@@ -181,10 +185,10 @@ fn recent_to_messages(
 mod tests {
     use super::*;
     use crate::message::{decode_frame, encode_message};
-    use prost::Message;
     use crate::protobuf::{
         CMsgProtoBufHeader, c_friend_messages_get_recent_messages_response::FriendMessage,
     };
+    use prost::Message;
 
     const SELF_STEAMID: u64 = 76561198000000001;
     const PARTNER_STEAMID: u64 = 76561198000000002;
@@ -288,8 +292,11 @@ mod tests {
             local_echo: Some(false),
             ..Default::default()
         };
-        let packet =
-            incoming_packet(EMsg::ServiceMethodSendToClient, INCOMING_MESSAGE_JOB, &notification);
+        let packet = incoming_packet(
+            EMsg::ServiceMethodSendToClient,
+            INCOMING_MESSAGE_JOB,
+            &notification,
+        );
         assert!(matches!(
             decode_incoming(&packet),
             Some(FriendsEvent::IncomingMessage(_))
@@ -305,7 +312,9 @@ mod tests {
         };
         let packet = incoming_packet(EMsg::ServiceMethod, INCOMING_MESSAGE_JOB, &notification);
         match decode_incoming(&packet) {
-            Some(FriendsEvent::TypingNotification { steamid }) => assert_eq!(steamid, PARTNER_STEAMID),
+            Some(FriendsEvent::TypingNotification { steamid }) => {
+                assert_eq!(steamid, PARTNER_STEAMID)
+            }
             other => panic!("expected TypingNotification, got {other:?}"),
         }
     }
