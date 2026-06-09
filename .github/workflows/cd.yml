@@ -59,7 +59,7 @@ jobs:
             ## Install
 
             ```bash
-            cargo add vapour-protocol
+            cargo add steam-cm-protocol
             ```
           draft: false
         env:

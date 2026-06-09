@@ -5,7 +5,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("vapour-protocol feature is not implemented yet: {0}")]
+    #[error("steam-cm-protocol feature is not implemented yet: {0}")]
     Unsupported(&'static str),
     #[error("protocol error: {0}")]
     Protocol(String),

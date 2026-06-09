@@ -1,11 +1,11 @@
 [package]
-name = "vapour-protocol"
-version = "0.4.0"
+name = "steam-cm-protocol"
+version = "0.4.1"
 edition = "2024"
 description = "Steam client protocol implementation for native Rust applications"
-homepage = "https://github.com/LargeModGames/vapour-protocol"
-documentation = "https://docs.rs/vapour-protocol"
-repository = "https://github.com/LargeModGames/vapour-protocol"
+homepage = "https://github.com/LargeModGames/steam-cm-protocol"
+documentation = "https://docs.rs/steam-cm-protocol"
+repository = "https://github.com/LargeModGames/steam-cm-protocol"
 keywords = ["steam", "protocol", "client", "websocket"]
 categories = ["api-bindings", "network-programming"]
 authors = ["LargeModGames <LargeModGames@gmail.com>"]

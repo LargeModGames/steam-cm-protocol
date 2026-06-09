@@ -38,7 +38,7 @@ impl ServerListCache {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
-                .user_agent("vapour-protocol/0.1")
+                .user_agent("steam-cm-protocol/0.1")
                 .build()
                 .expect("reqwest client builder is valid"),
             cache: Arc::new(Mutex::new(Vec::new())),

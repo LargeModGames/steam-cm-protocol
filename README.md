@@ -1,11 +1,11 @@
-# vapour-protocol
+# steam-cm-protocol
 
 Rust implementation of the Steam client protocol for building native Steam applications.
 
-`vapour-protocol` speaks directly to Steam CM servers over WebSocket and exposes higher-level
+`steam-cm-protocol` speaks directly to Steam CM servers over WebSocket and exposes higher-level
 Rust APIs for client-style Steam features — authentication, friends, chat, and your game library —
 without depending on the Steam client or Web API key. It was built for, and is used by,
-[Vapour](https://github.com/LargeModGames/vapour), but it is a standalone crate you can use on its own.
+[Steamie](https://github.com/LargeModGames/steamie), but it is a standalone crate you can use on its own.
 
 ## Features
 
@@ -32,10 +32,10 @@ and you are responsible for using it in line with the Steam Subscriber Agreement
 ## Install
 
 ```bash
-cargo add vapour-protocol
+cargo add steam-cm-protocol
 ```
 
-`vapour-protocol` pulls in `tokio`, so add it too if you don't already depend on it:
+`steam-cm-protocol` pulls in `tokio`, so add it too if you don't already depend on it:
 
 ```bash
 cargo add tokio --features full
@@ -48,10 +48,10 @@ used here is re-exported from the crate root.
 
 ```rust,no_run
 use tokio::sync::mpsc;
-use vapour_protocol::{AuthEvent, AuthMethod, Error, FriendsEvent, RunCommand, SteamClient};
+use steam_cm_protocol::{AuthEvent, AuthMethod, Error, FriendsEvent, RunCommand, SteamClient};
 
 #[tokio::main]
-async fn main() -> vapour_protocol::Result<()> {
+async fn main() -> steam_cm_protocol::Result<()> {
     let mut client = SteamClient::new();
 
     // 1. Authenticate. QR is shown here; see "Authentication" for credentials / refresh tokens.
@@ -191,15 +191,15 @@ cargo test --locked
 cargo package --locked
 ```
 
-If you are developing `vapour-protocol` alongside Vapour, point Vapour at your local checkout with a
+If you are developing `steam-cm-protocol` alongside Steamie, point Steamie at your local checkout with a
 path dependency so changes to both land together:
 
 ```toml
-vapour-protocol = { path = "../vapour-protocol" }
+steam-cm-protocol = { path = "../steam-cm-protocol" }
 ```
 
 Release steps are documented in
-[how_to_release.md](https://github.com/LargeModGames/vapour-protocol/blob/main/how_to_release.md).
+[how_to_release.md](https://github.com/LargeModGames/steam-cm-protocol/blob/main/how_to_release.md).
 
 ## License
 
