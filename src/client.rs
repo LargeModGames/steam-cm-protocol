@@ -53,7 +53,7 @@ pub enum RunCommand {
 const PROTOCOL_VERSION: u32 = 65580;
 const CLIENT_LANGUAGE: &str = "english";
 const CLIENT_OS_TYPE: u32 = 20;
-const DEFAULT_DEVICE_NAME: &str = "Vapour";
+const DEFAULT_DEVICE_NAME: &str = "Steamie";
 const DEFAULT_WEBSITE_ID: &str = "Unknown";
 const DEFAULT_GAMING_DEVICE_TYPE: u32 = 1;
 
@@ -709,5 +709,5 @@ fn build_device_details() -> CAuthenticationDeviceDetails {
 }
 
 fn machine_id() -> Vec<u8> {
-    b"vapour".to_vec()
+    b"steamie".to_vec()
 }

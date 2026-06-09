@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [v0.4.1] - 2026-06-09
+
+### Changed
+
+- Renamed the crate from `vapour-protocol` to `steam-cm-protocol` to reflect that it speaks the Steam Connection Manager (CM) protocol, and to decouple it from the consuming application's brand. Code is otherwise equivalent to `vapour-protocol` 0.4.0.
+
+
 ## [v0.4.0] - 2026-06-09
 
 ### Added

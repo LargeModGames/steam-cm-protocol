@@ -1,6 +1,6 @@
-# Contributing to vapour-protocol
+# Contributing to steam-cm-protocol
 
-`vapour-protocol` is the standalone Steam client protocol crate used by Vapour.
+`steam-cm-protocol` is the standalone Steam client protocol crate used by Steamie.
 
 ## Ground rules
 
@@ -20,6 +20,6 @@ cargo test --locked
 cargo package --locked
 ```
 
-## Coordinating with Vapour
+## Coordinating with Steamie
 
-Vapour may depend on a local checkout of this repository while protocol work is in progress. For changes that Vapour must consume immediately, keep the protocol PR small and merge/release it before switching Vapour to the new API.
+Steamie may depend on a local checkout of this repository while protocol work is in progress. For changes that Steamie must consume immediately, keep the protocol PR small and merge/release it before switching Steamie to the new API.

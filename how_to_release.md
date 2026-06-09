@@ -34,12 +34,12 @@ Use a SemVer pre-release tag like `v0.3.0-rc1` or `v0.3.0-beta.1`.
 
 Pre-release tags create a GitHub pre-release and skip crates.io publishing.
 
-## Vapour dependency update
+## Steamie dependency update
 
-`vapour` currently consumes this repo through local path dependencies. After a stable `vapour-protocol` release is published, update `vapour` to the released version when you want normal dependency resolution:
+`steamie` currently consumes this repo through local path dependencies. After a stable `steam-cm-protocol` release is published, update `steamie` to the released version when you want normal dependency resolution:
 
 ```toml
-vapour-protocol = "0.2"
+steam-cm-protocol = "0.2"
 ```
 
 Keep the path dependency locally while coordinating unreleased protocol changes across both repos.
