@@ -23,7 +23,7 @@ bytes = "1"
 flate2 = "1"
 futures-util = "0.3"
 prost = "0.14"
-rand = "0.8"
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rsa = "0.9"
 serde = { version = "1", features = ["derive"] }
